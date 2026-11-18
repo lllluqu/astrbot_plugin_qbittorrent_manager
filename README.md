@@ -14,13 +14,17 @@ _✨ 按 QQ 用户独立配置 PT 站，并推送到 qBittorrent / uTorrent 下�
 
 这是一个基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的下载客户端管理插件。
 
-插件支持用户在 QQ 群或私聊中搜索 PT 站种子，默认适配北洋园 PT（天津大学 PT 站），搜索结果会通过 AstrBot 自带的 t2i 服务渲染为卡片。每位用户按照 QQ 号使用独立配置，可以选择自己的 PT 站点、Cookie、qBittorrent 或 uTorrent 客户端。
+插件支持用户在 QQ 群或私聊中搜索 PT 站种子，默认适配 [Gay-Torrents](https://www.gay-torrents.net/)（vBulletin + GT_torrents 插件），搜索结果会通过 AstrBot 自带的 t2i 服务渲染为卡片。每位用户按照 QQ 号使用独立配置，可以选择自己的 PT 站点、Cookie、qBittorrent 或 uTorrent 客户端。
 
-> 默认面向 NexusPHP 风格站点设计，其他同类 PT 站可通过配置搜索地址适配。
+> 默认站点为 Gay-Torrents。将 `provider_type` 设置为 `nexusphp` 可继续使用 NexusPHP 风格站点（如北洋园 PT），设置为 `mteam` 使用 M-Team API。
+
+### Gay-Torrents 登录
+
+Gay-Torrents 必须登录才能搜索。可以填写登录后的 Cookie，也可以用 `/种子配置 设置 pt账号 你的账号` 和 `/种子配置 设置 pt密码 你的密码` 让插件自动登录（会话默认缓存 6 小时）。
 
 ### M-Team API
 
-当前仓库版本为 `v1.7.1`。将 `provider_type` 设置为 `mteam` 后，插件使用 M-Team API 搜索和下载，不再解析网页。默认使用 `https://api.m-team.cc`、`POST /api/torrent/search` 和 `POST /api/torrent/genDlToken`；配置 `mteam_api_token` 后即可使用。根据官方 Wiki，第三方调用必须将 Access Token 放在 `x-api-key` 请求头中；请勿使用 Cookie 代替 API Token。建议先将 `provider_base_url` 设置为 `https://test2.m-team.cc` 验证搜索和下载流程，再切换到生产站点。
+当前仓库版本为 `v1.8.0`。将 `provider_type` 设置为 `mteam` 后，插件使用 M-Team API 搜索和下载，不再解析网页。默认使用 `https://api.m-team.cc`、`POST /api/torrent/search` 和 `POST /api/torrent/genDlToken`；配置 `mteam_api_token` 后即可使用。根据官方 Wiki，第三方调用必须将 Access Token 放在 `x-api-key` 请求头中；请勿使用 Cookie 代替 API Token。建议先将 `provider_base_url` 设置为 `https://test2.m-team.cc` 验证搜索和下载流程，再切换到生产站点。
 
 ## 🖼️ 效果预览
 
@@ -28,7 +32,8 @@ _✨ 按 QQ 用户独立配置 PT 站，并推送到 qBittorrent / uTorrent 下�
 
 ## ✨ 功能特性
 
-- 🔍 **群聊搜索**：使用 `/种子 关键词` 搜索 PT 站种子，并可按时间、做种、下载、完成、大小或标题排序。
+- 🔍 **群聊搜索**：使用 `/种子 关键词` 搜索 PT 站种子，默认站点为 Gay-Torrents，并可按时间、做种、下载、完成、大小或标题排序。
+- 🔑 **自动登录**：Gay-Torrents 支持用 `pt账号` / `pt密码` 自动登录并缓存会话，也可以直接填写浏览器 Cookie。
 - 🖼️ **卡片渲染**：使用 AstrBot t2i 服务将搜索结果渲染为图片卡片。
 - 📊 **种子状态**：在搜索卡片中显示当前 PT 账号的下载、做种、完成等状态及进度条。
 - ⬇️ **批量下载**：使用 `/种子下载 1 3 5` 一次添加多个搜索结果到 qBittorrent 或 uTorrent。
@@ -58,10 +63,12 @@ git clone <本仓库地址>
 
 | 配置项 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `provider_type` | 否 | `nexusphp` | PT 站点类型，可选 `nexusphp` 或 `mteam`。 |
-| `provider_base_url` | 否 | `https://www.tjupt.org/` | PT 站点根地址；M-Team 可填写 `https://api.m-team.cc`。 |
-| `provider_search_path` | 否 | `torrents.php?search={keyword}&incldead=0` | 搜索路径，必须包含 `{keyword}` 占位符。 |
-| `provider_cookie` | 是 | 空 | PT 站登录 Cookie，用于搜索和下载 `.torrent` 文件。 |
+| `provider_type` | 否 | `gaytorrents` | PT 站点类型，可选 `gaytorrents`、`nexusphp` 或 `mteam`。 |
+| `provider_base_url` | 否 | `https://www.gay-torrents.net/` | PT 站点根地址；NexusPHP 可填写 `https://www.tjupt.org/`，M-Team 可填写 `https://api.m-team.cc`。 |
+| `provider_search_path` | 否 | `GT_torrents/GT_ajax_search.php?filename={keyword}` | 搜索路径，必须包含 `{keyword}` 占位符。 |
+| `provider_cookie` | 否 | 空 | PT 站登录 Cookie，用于搜索和下载 `.torrent` 文件。Gay-Torrents 留空时会使用下面的账号密码自动登录。 |
+| `provider_username` | 否 | 空 | PT 站账号，Gay-Torrents 自动登录使用。 |
+| `provider_password` | 否 | 空 | PT 站密码，Gay-Torrents 自动登录使用。建议仅在私聊或 AstrBot 面板中设置。 |
 | `mteam_api_token` | M-Team 必填 | 空 | M-Team API Token。建议仅在私聊或 AstrBot 面板中设置。 |
 | `mteam_search_path` | 否 | `/api/torrent/search` | M-Team API 搜索接口路径。 |
 | `mteam_download_path` | 否 | `/api/torrent/genDlToken` | M-Team 获取临时种子下载链接的接口路径。 |
@@ -109,19 +116,33 @@ QQ 用户独立配置 > AstrBot 面板全局默认配置 > 插件内置默认值
 
 管理员身份直接使用 AstrBot 消息事件的管理员权限判断，不需要在本插件中重复填写管理员 QQ 号。
 
-## 🍪 Cookie 填写说明
+## 🍪 登录说明
 
-北洋园 PT 登录态通常依赖 `access_token`。推荐在浏览器开发者工具中复制搜索页面请求的 Cookie。
+### Gay-Torrents（默认站点）
 
-通常可填写：
+Gay-Torrents 需要登录才能搜索和下载，插件支持两种方式：
+
+1. **填写 Cookie**：在浏览器登录站点后，从开发者工具的请求头复制完整 Cookie，通常形如：
+
+   ```text
+   ENvbbuserid=你的用户ID; ENvbbpasswordhash=你的密码哈希; ENvbbsessionhash=会话哈希
+   ```
+
+   只有 `ENvbbsessionhash` 这类访客 Cookie 是不够的，必须包含 `ENvbbuserid` 和 `ENvbbpasswordhash`。
+
+2. **账号密码自动登录**：设置 `pt账号` 和 `pt密码`，插件会向 `login.php` 提交 `vb_login_username` / `vb_login_password` 并复用站点返回的会话 Cookie（默认缓存 6 小时）。若站点启用了图片验证码或异常登录保护，自动登录会失败，请改用 Cookie。
+
+未登录时站点会返回登录页而不是搜索结果，插件会提示「需要登录」。Cookie 等同登录凭证，请不要发到群聊、截图或公开仓库中。
+
+### NexusPHP 站点
+
+北洋园 PT 等 NexusPHP 站点的登录态通常依赖 `access_token`，推荐在浏览器开发者工具中复制搜索页面请求的 Cookie：
 
 ```text
 access_token=你的真实值; ip_notice_ignore=1
 ```
 
 如果搜索或下载失败，可以改为填写浏览器复制到的完整 Cookie。
-
-> `access_token` 等同登录凭证，请不要发到群聊、截图或公开仓库中。
 
 ## 🚀 使用方法
 
@@ -148,12 +169,26 @@ AI 工具与聊天命令使用同一套权限控制和用户配置；未配置 P
 
 ```text
 /种子配置 设置 客户端 qbittorrent
-/种子配置 设置 站点 https://www.tjupt.org/
-/种子配置 设置 搜索路径 torrents.php?search={keyword}&incldead=0
-/种子配置 设置 cookie access_token=你的真实值
 /种子配置 设置 qb地址 http://127.0.0.1:8080
 /种子配置 设置 qb用户名 admin
 /种子配置 设置 qb密码 你的密码
+```
+
+Gay-Torrents 用户可设置（`gaytorrents` 是默认站点类型）：
+
+```text
+/种子配置 设置 pt账号 你的账号
+/种子配置 设置 pt密码 你的密码
+/种子配置 设置 cookie 登录后的完整 Cookie
+```
+
+NexusPHP 站点（如北洋园 PT）可设置：
+
+```text
+/种子配置 设置 站点类型 nexusphp
+/种子配置 设置 站点 https://www.tjupt.org/
+/种子配置 设置 搜索路径 torrents.php?search={keyword}&incldead=0
+/种子配置 设置 cookie access_token=你的真实值
 ```
 
 M-Team 用户可设置：
@@ -203,7 +238,7 @@ uTorrent 用户可以设置：
 
 如果 PT 站搜索页面提供当前用户的种子状态，结果卡片会在对应条目中显示“状态 + 进度条 + 百分比”。状态文字位于进度条左侧，下载使用蓝色、做种使用绿色，完成或暂停等非活动状态使用灰色；没有状态数据的条目不会显示空进度条。
 
-> 此处显示的是当前用户 Cookie 对应的 PT 站账号状态，并非 qBittorrent 或 uTorrent 客户端的实时任务状态。不同 NexusPHP 站点是否提供该信息取决于站点页面结构和账号登录状态。
+> 此处显示的是当前用户 Cookie 对应的 PT 站账号状态，并非 qBittorrent 或 uTorrent 客户端的实时任务状态。Gay-Torrents 的搜索结果不提供种子状态和完成数（完成数显示为 `?`）；NexusPHP 站点是否提供状态信息取决于站点页面结构和账号登录状态。
 
 需要排序时，在搜索词前添加排序选项，并使用独立的 `--` 分隔参数和搜索词：
 
@@ -214,6 +249,8 @@ uTorrent 用户可以设置：
 ```
 
 排序字段支持 `时间/time`、`做种/seeders`、`下载/leechers`、`完成/completed`、`大小/size` 和 `标题/title`；顺序支持 `升序/asc` 与 `降序/desc`。省略 `--order` 时默认降序。
+
+Gay-Torrents 的搜索接口不接受排序参数，插件会取回前 5 页结果后在本地排序，因此排序对 `时间`、`大小`、`做种`、`下载` 和 `标题` 有效；站点未提供完成数，按 `完成` 排序时顺序保持不变。
 
 兼容中文输入法可能产生的全角符号，例如下面的写法也可以识别：
 
@@ -312,7 +349,8 @@ HTTPS_PROXY=http://127.0.0.1:7897
 
 ## ⚠️ 注意事项
 
-- 本插件不会绕过 PT 站权限，搜索和下载均依赖有效登录 Cookie。
+- 本插件不会绕过 PT 站权限，搜索和下载均依赖有效登录 Cookie 或账号密码。
+- Gay-Torrents 需要登录才能搜索和下载，请确保 Cookie 或账号配置仍然有效；插件只按普通用户方式提交搜索与下载请求。
 - 请遵守 PT 站点规则，不要滥用搜索和下载功能。
 - 请遵守所在地法律法规，插件仅提供任务添加能力。
 - Cookie、qBittorrent/uTorrent 密码等敏感配置请妥善保管，建议仅通过 AstrBot 面板或机器人私聊设置。

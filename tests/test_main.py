@@ -95,6 +95,7 @@ def make_plugin(config):
     instance.config = config
     instance._config_lock = asyncio.Lock()
     instance._search_cache = {}
+    instance._gt_sessions = {}
     return instance
 
 
@@ -563,7 +564,9 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(regular_config["qb_username"], "personal-user")
         self.assertEqual(regular_config["qb_url"], "")
         self.assertEqual(regular_config["provider_cookie"], "")
-        self.assertEqual(regular_config["provider_base_url"], "https://www.tjupt.org/")
+        self.assertEqual(
+            regular_config["provider_base_url"], "https://www.gay-torrents.net/"
+        )
         self.assertEqual(admin_config["qb_url"], "http://global:8080")
         self.assertEqual(admin_config["provider_cookie"], "global-cookie")
 
@@ -706,6 +709,376 @@ class QBittorrentWebAPITests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(plugin_module.UserFacingError, "可能已存在"):
             self.instance._check_qbittorrent_add_response(response, "添加失败")
+
+
+GT_ROWS_HTML = """
+<div class="torrents">
+  <torrent>
+    <li class="Torrent-List-Size">1.2 GB</li>
+    <li class="Torrent-List-Seeds">42</li>
+    <li class="Torrent-List-Peers">7</li>
+    <li class="Torrent-List-Date">21:05 03-Nov-2026</li>
+    <a href="torrentslist.php?type=Video%2FHDTV">Video/HDTV</a>
+    <a href="torrentdetails.php?torrentid=12345">[FL] Some Movie 1080p</a>
+  </torrent>
+  <torrent>
+    <li class="TorrentList3">700 MB</li>
+    <li class="TorrentList6">3</li>
+    <li class="TorrentList7">1</li>
+    <li class="TorrentList8">09:00 01-Jan-2025</li>
+    <a href="torrentslist.php?type=Games">Games</a>
+    <a href="/torrentdetails.php?torrentid=999">Some Game</a>
+  </torrent>
+</div>
+"""
+
+GT_LOGIN_PAGE_HTML = """
+<html><head><script>var SECURITYTOKEN = "guest";</script></head>
+<body><div class="standard_error">You are not logged in or you do not have
+permission to access this page.</div>
+<form><input type="text" name="vb_login_username"></form></body></html>
+"""
+
+
+class GayTorrentsProviderTests(unittest.TestCase):
+    def test_default_provider_is_gaytorrents(self):
+        instance = make_plugin({})
+
+        provider = instance._provider_config(instance._user_config(FakeEvent("1")))
+
+        self.assertEqual(provider["type"], "gaytorrents")
+        self.assertEqual(provider["base_url"], "https://www.gay-torrents.net/")
+        self.assertEqual(
+            provider["search_path"],
+            "GT_torrents/GT_ajax_search.php?filename={keyword}",
+        )
+
+    def test_legacy_provider_types_keep_their_defaults(self):
+        instance = make_plugin({})
+
+        nexusphp = instance._provider_config({"provider_type": "nexusphp"})
+        mteam = instance._provider_config(
+            {"provider_type": "M-Team", "mteam_api_token": "token"}
+        )
+
+        self.assertEqual(nexusphp["base_url"], "https://www.tjupt.org/")
+        self.assertIn("torrents.php?search={keyword}", nexusphp["search_path"])
+        self.assertEqual(mteam["type"], "mteam")
+        self.assertEqual(mteam["base_url"], "https://api.m-team.cc")
+        self.assertEqual(mteam["search_path"], "/api/torrent/search")
+
+    def test_provider_type_aliases_map_to_gaytorrents(self):
+        instance = make_plugin({})
+
+        for value in ("gaytorrents", "gay-torrents-net", "GT", "gay_t"):
+            self.assertEqual(
+                instance._provider_config({"provider_type": value})["type"],
+                "gaytorrents",
+                value,
+            )
+
+    def test_switching_provider_type_resets_builtin_defaults(self):
+        instance = make_plugin({})
+
+        provider = instance._provider_config(
+            {
+                "provider_type": "nexusphp",
+                "provider_base_url": "https://www.gay-torrents.net/",
+                "provider_search_path": "GT_torrents/GT_ajax_search.php?filename={keyword}",
+            }
+        )
+
+        self.assertEqual(provider["type"], "nexusphp")
+        self.assertEqual(provider["base_url"], "https://www.tjupt.org/")
+        self.assertIn("torrents.php?search={keyword}", provider["search_path"])
+
+    def test_custom_site_url_is_preserved(self):
+        instance = make_plugin({})
+
+        provider = instance._provider_config(
+            {
+                "provider_type": "gaytorrents",
+                "provider_base_url": "https://mirror.example.com/",
+            }
+        )
+
+        self.assertEqual(provider["base_url"], "https://mirror.example.com/")
+
+
+class GayTorrentsParserTests(unittest.TestCase):
+    def setUp(self):
+        self.instance = make_plugin({})
+        self.provider = self.instance._provider_config(
+            dict(plugin_module.BUILTIN_USER_CONFIG)
+        )
+
+    def test_parses_torrent_rows(self):
+        results = self.instance._parse_gaytorrents_results(
+            GT_ROWS_HTML, "https://www.gay-torrents.net/", 10
+        )
+
+        self.assertEqual(len(results), 2)
+        first, second = results
+        self.assertEqual((first.index, second.index), (1, 2))
+        self.assertEqual(first.title, "Some Movie 1080p")
+        self.assertEqual(first.subtitle, "Video/HDTV · 免费")
+        self.assertEqual(first.size, "1.2 GB")
+        self.assertEqual(first.seeders, "42")
+        self.assertEqual(first.leechers, "7")
+        self.assertEqual(first.completed, "?")
+        self.assertEqual(
+            first.detail_url,
+            "https://www.gay-torrents.net/torrentdetails.php?torrentid=12345",
+        )
+        self.assertEqual(
+            first.download_url,
+            "https://www.gay-torrents.net/torrentdetails.php?torrentid=12345&do=download",
+        )
+        self.assertEqual(first.added_at, "2026-11-03 21:05")
+        self.assertEqual(second.title, "Some Game")
+        self.assertEqual(second.subtitle, "Games")
+        self.assertEqual(second.added_at, "2025-01-01 09:00")
+
+    def test_falls_back_to_anchor_parent(self):
+        html_text = """
+        <ul><li class="Torrent-Item">
+          <a href="torrentdetails.php?torrentid=8">Plain Title</a>
+          <span class="Torrent-List-Size">5 GB</span>
+        </li></ul>
+        """
+
+        results = self.instance._parse_gaytorrents_results(
+            html_text, "https://www.gay-torrents.net/", 10
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "Plain Title")
+        self.assertEqual(results[0].size, "5 GB")
+
+    def test_parses_escaped_row_markup(self):
+        html_text = (
+            '<torrent>&lt;a href="torrentdetails.php?torrentid=7"&gt;'
+            "Escaped Title&lt;/a&gt;</torrent>"
+        )
+
+        results = self.instance._parse_gaytorrents_results(
+            html_text, "https://www.gay-torrents.net/", 10
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "Escaped Title")
+
+    def test_respects_result_limit(self):
+        results = self.instance._parse_gaytorrents_results(
+            GT_ROWS_HTML, "https://www.gay-torrents.net/", 1
+        )
+
+        self.assertEqual(len(results), 1)
+
+    def test_detects_login_required_pages(self):
+        self.assertTrue(self.instance._gaytorrents_requires_login(GT_LOGIN_PAGE_HTML))
+        self.assertFalse(self.instance._gaytorrents_requires_login(GT_ROWS_HTML))
+
+    def test_boolean_keyword_rewriting(self):
+        self.assertEqual(
+            self.instance._gaytorrents_query("Big Blue Movie with Friends"),
+            "Big +Blue +Movie +Friends",
+        )
+        self.assertEqual(self.instance._gaytorrents_query("TIM abc"), "TIM abc")
+
+    def test_search_url_quotes_keyword_and_appends_page(self):
+        url = self.instance._gaytorrents_search_url(self.provider, "Big Blue", 2)
+
+        self.assertEqual(
+            url,
+            "https://www.gay-torrents.net/GT_torrents/GT_ajax_search.php"
+            "?filename=Big+Blue&page=2",
+        )
+
+    def test_search_url_replaces_existing_page_parameter(self):
+        provider = self.instance._provider_config(
+            {
+                "provider_type": "gaytorrents",
+                "provider_search_path": "GT_torrents/GT_ajax_search.php"
+                "?filename={keyword}&page=0",
+            }
+        )
+
+        url = self.instance._gaytorrents_search_url(provider, "tim", 3)
+
+        self.assertEqual(
+            url,
+            "https://www.gay-torrents.net/GT_torrents/GT_ajax_search.php"
+            "?filename=tim&page=3",
+        )
+
+    def test_normalizes_site_dates(self):
+        self.assertEqual(
+            self.instance._normalize_gaytorrents_date("21:05 03-Nov-2026"),
+            "2026-11-03 21:05",
+        )
+        self.assertEqual(
+            self.instance._normalize_gaytorrents_date("03-Nov-2026"), "2026-11-03"
+        )
+        self.assertEqual(self.instance._normalize_gaytorrents_date(""), "未知")
+        self.assertEqual(self.instance._normalize_gaytorrents_date("今天"), "今天")
+
+
+class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.instance = make_plugin({})
+
+    def install_client(self, client_factory):
+        calls = []
+
+        def factory(provider, user_config, **kwargs):
+            calls.append(kwargs)
+            return client_factory()
+
+        self.instance._http_client = factory
+        return calls
+
+    async def test_search_logs_in_and_uses_session_cookie(self):
+        posted = []
+
+        class FakeClient:
+            def __init__(self):
+                self.cookies = plugin_module.httpx.Cookies()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, data=None, **kwargs):
+                posted.append((url, data))
+                self.cookies.set("ENvbbuserid", "17")
+                self.cookies.set("ENvbbpasswordhash", "hash")
+                return plugin_module.httpx.Response(200, text="Logged in")
+
+            async def get(self, url, headers=None, **kwargs):
+                if "torrentslist.php" in url:
+                    return plugin_module.httpx.Response(
+                        200, text='<ul class="isuser">tester</ul>'
+                    )
+                return plugin_module.httpx.Response(200, text=GT_ROWS_HTML)
+
+        calls = self.install_client(FakeClient)
+        user_config = {
+            "provider_type": "gaytorrents",
+            "provider_username": "tester",
+            "provider_password": "pw",
+        }
+
+        results = await self.instance._search_gaytorrents(
+            "tim", user_config, None, True
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].title, "Some Movie 1080p")
+        self.assertEqual(posted[0][1]["vb_login_username"], "tester")
+        self.assertEqual(posted[0][1]["do"], "login")
+        self.assertEqual(
+            set(calls[-1]["cookie"].split("; ")),
+            {"ENvbbuserid=17", "ENvbbpasswordhash=hash"},
+        )
+        cached_cookie = self.instance._gt_sessions[
+            "https://www.gay-torrents.net/|tester"
+        ][1]
+        self.assertEqual(
+            set(cached_cookie.split("; ")),
+            {"ENvbbuserid=17", "ENvbbpasswordhash=hash"},
+        )
+
+    async def test_missing_credentials_ask_for_cookie_or_account(self):
+        with self.assertRaisesRegex(
+            plugin_module.UserFacingError, "pt账号 和 pt密码"
+        ):
+            await self.instance._search_gaytorrents("tim", {}, None, True)
+
+    async def test_expired_cookie_reports_invalid_login(self):
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def get(self, url, headers=None, **kwargs):
+                return plugin_module.httpx.Response(200, text=GT_LOGIN_PAGE_HTML)
+
+        self.install_client(FakeClient)
+
+        with self.assertRaisesRegex(plugin_module.UserFacingError, "登录状态无效"):
+            await self.instance._search_gaytorrents(
+                "tim",
+                {"provider_type": "gaytorrents", "provider_cookie": "stale=1"},
+                None,
+                True,
+            )
+
+    async def test_auto_login_retries_once_then_reports_failure(self):
+        class FakeClient:
+            def __init__(self):
+                self.cookies = plugin_module.httpx.Cookies()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, data=None, **kwargs):
+                self.cookies.set("ENvbbuserid", "17")
+                return plugin_module.httpx.Response(200, text="Logged in")
+
+            async def get(self, url, headers=None, **kwargs):
+                if "torrentslist.php" in url:
+                    return plugin_module.httpx.Response(
+                        200, text='<ul class="isuser">tester</ul>'
+                    )
+                return plugin_module.httpx.Response(200, text=GT_LOGIN_PAGE_HTML)
+
+        self.install_client(FakeClient)
+        user_config = {
+            "provider_type": "gaytorrents",
+            "provider_username": "tester",
+            "provider_password": "pw",
+        }
+
+        with self.assertRaisesRegex(
+            plugin_module.UserFacingError, "自动登录后仍无法访问"
+        ):
+            await self.instance._search_gaytorrents("tim", user_config, None, True)
+
+    async def test_login_without_isuser_marks_credentials_invalid(self):
+        class FakeClient:
+            def __init__(self):
+                self.cookies = plugin_module.httpx.Cookies()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, data=None, **kwargs):
+                self.cookies.set("ENvbbuserid", "17")
+                return plugin_module.httpx.Response(
+                    200, text='<div class="blockrow">Invalid username or password</div>'
+                )
+
+            async def get(self, url, headers=None, **kwargs):
+                return plugin_module.httpx.Response(200, text=GT_LOGIN_PAGE_HTML)
+
+        self.install_client(FakeClient)
+        provider = self.instance._provider_config(
+            {"provider_username": "tester", "provider_password": "pw"}
+        )
+
+        with self.assertRaisesRegex(plugin_module.UserFacingError, "自动登录失败"):
+            await self.instance._login_gaytorrents(provider, {})
 
 
 if __name__ == "__main__":

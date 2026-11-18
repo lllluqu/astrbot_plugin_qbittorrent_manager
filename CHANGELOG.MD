@@ -2,6 +2,17 @@
 
 所有重要更改都将记录在此文件中。
 
+## [1.8.0] - 2026-11-18
+
+### Gay-Torrents 搜索
+
+- 新增 `provider_type=gaytorrents`，搜索 [Gay-Torrents](https://www.gay-torrents.net/) 的 `GT_torrents/GT_ajax_search.php` 结果，并将其设为默认站点；NexusPHP 与 M-Team 适配保持不变，可随时切回。
+- 搜索会先按原关键词查询，再用站点自身的布尔语法（4 个字符以上的词加 `+`、忽略停用词 `with`）重试，读取前 5 页结果，按种子链接去重后截断到 `max_results`。
+- 解析 `<torrent>` 行（兼容旧版 `TorrentList3/6/7/8` 类名），提取标题、分类、免费标记（`[FL]` / `[FFL]`）、大小、做种数、下载数和发布时间（`HH:mm dd-MMM-yyyy` 归一化为 `YYYY-MM-DD HH:mm`）；站点列表不提供完成数，显示为 `?`。
+- 新增 `provider_username` / `provider_password`（命令别名 `pt账号` / `pt密码`）。未配置 Cookie 时插件会用账号密码登录 `login.php` 并缓存会话 Cookie（默认 6 小时）；登录失效或站点没有返回 `.torrent` 时给出中文提示。
+- 搜索结果排序改为本地执行，因为 Gay-Torrents 的搜索接口不接受排序参数。
+- 同步更新 `_conf_schema.json`、README 和单元测试（新增 Gay-Torrents 站点配置、结果解析、登录会话与下载校验测试）。
+
 ## [1.7.1] - 2026-09-12
 
 ### AI 自然语言工具

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import (
+    parse_qs,
     parse_qsl,
     quote,
     unquote,
@@ -46,7 +47,7 @@ MAX_RENDER_HEIGHT = 5000
 RENDER_BASE_HEIGHT = 214
 RENDER_ITEM_HEIGHT = 108
 RENDER_STATUS_HEIGHT = 38
-PLUGIN_VERSION = "1.7.1"
+PLUGIN_VERSION = "1.8.0"
 
 SORT_FIELD_ALIASES = {
     "time": "time",
@@ -98,6 +99,63 @@ MTEAM_SORT_FIELDS = {
 }
 OPTION_PREFIX_PATTERN = r"(?:--|[－—–−]{1,2})"
 
+# Gay-Torrents.net 是 vBulletin 4 + “Torrent Search v1.31 (SCS)” 模块的私有站，
+# 搜索走 GT_torrents/GT_ajax_search.php，结果行是 <torrent> 自定义标签。
+GAYTORRENTS_DEFAULT_BASE_URL = "https://www.gay-torrents.net/"
+GAYTORRENTS_DEFAULT_SEARCH_PATH = "GT_torrents/GT_ajax_search.php?filename={keyword}"
+GAYTORRENTS_LOGIN_PATH = "login.php"
+GAYTORRENTS_LIST_PATH = "torrentslist.php"
+GAYTORRENTS_MAX_PAGES = 5
+GAYTORRENTS_SESSION_TTL_SECONDS = 6 * 3600
+GAYTORRENTS_PROVIDER_TYPES = {"gaytorrents", "gaytorrentsnet", "gt", "gayt"}
+GAYTORRENTS_DETAIL_HREF = re.compile(r"torrentdetails\.php\?torrentid=", re.IGNORECASE)
+GAYTORRENTS_CATEGORY_HREF = re.compile(r"torrentslist\.php\?type=", re.IGNORECASE)
+# 列表页的两种 class 命名（新版 Torrent-List-*，旧版 TorrentListN）。
+GAYTORRENTS_CELL_CLASSES = {
+    "size": ("Torrent-List-Size", "TorrentList3"),
+    "seeders": ("Torrent-List-Seeds", "TorrentList6"),
+    "leechers": ("Torrent-List-Peers", "TorrentList7"),
+    "added_at": ("Torrent-List-Date", "TorrentList8"),
+}
+# 列表页不提供完成次数，猜测未验证的 class 只会带来错误数据，因此固定为 “?”。
+GAYTORRENTS_UNKNOWN_COMPLETED = "?"
+GAYTORRENTS_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+DEFAULT_PROVIDER_CONFIG = {
+    "nexusphp": {
+        "base_url": "https://www.tjupt.org/",
+        "search_path": "torrents.php?search={keyword}&incldead=0",
+    },
+    "gaytorrents": {
+        "base_url": GAYTORRENTS_DEFAULT_BASE_URL,
+        "search_path": GAYTORRENTS_DEFAULT_SEARCH_PATH,
+    },
+    "mteam": {
+        "base_url": "https://api.m-team.cc",
+        "search_path": "/api/torrent/search",
+        "download_path": "/api/torrent/genDlToken",
+    },
+}
+BUILTIN_PROVIDER_BASE_URLS = {
+    item["base_url"] for item in DEFAULT_PROVIDER_CONFIG.values()
+}
+BUILTIN_PROVIDER_SEARCH_PATHS = {
+    item["search_path"] for item in DEFAULT_PROVIDER_CONFIG.values()
+}
+
 
 @dataclass(frozen=True)
 class ConfigField:
@@ -113,6 +171,8 @@ USER_CONFIG_FIELDS = {
     "provider_base_url": ConfigField("PT 站点地址"),
     "provider_search_path": ConfigField("PT 搜索路径"),
     "provider_cookie": ConfigField("PT Cookie", sensitive=True),
+    "provider_username": ConfigField("PT 账号"),
+    "provider_password": ConfigField("PT 密码", sensitive=True),
     "mteam_api_token": ConfigField("M-Team API Token", sensitive=True),
     "mteam_search_path": ConfigField("M-Team API 搜索路径"),
     "mteam_download_path": ConfigField("M-Team API 下载路径"),
@@ -134,10 +194,12 @@ USER_CONFIG_FIELDS = {
 }
 
 BUILTIN_USER_CONFIG = {
-    "provider_type": "nexusphp",
-    "provider_base_url": "https://www.tjupt.org/",
-    "provider_search_path": "torrents.php?search={keyword}&incldead=0",
+    "provider_type": "gaytorrents",
+    "provider_base_url": GAYTORRENTS_DEFAULT_BASE_URL,
+    "provider_search_path": GAYTORRENTS_DEFAULT_SEARCH_PATH,
     "provider_cookie": "",
+    "provider_username": "",
+    "provider_password": "",
     "mteam_api_token": "",
     "mteam_search_path": "/api/torrent/search",
     "mteam_download_path": "/api/torrent/genDlToken",
@@ -169,6 +231,11 @@ CONFIG_KEY_ALIASES = {
     "pt站点": "provider_base_url",
     "搜索路径": "provider_search_path",
     "cookie": "provider_cookie",
+    "pt账号": "provider_username",
+    "pt用户名": "provider_username",
+    "pt密码": "provider_password",
+    "站点账号": "provider_username",
+    "站点密码": "provider_password",
     "客户端": "download_client",
     "qb地址": "qb_url",
     "qb用户名": "qb_username",
@@ -237,6 +304,7 @@ class QBittorrentManagerPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._search_cache: dict[str, tuple[float, int, list[TorrentResult]]] = {}
+        self._gt_sessions: dict[str, tuple[float, str]] = {}
         self._config_lock = asyncio.Lock()
 
     @filter.command("种子")
@@ -578,6 +646,10 @@ class QBittorrentManagerPlugin(Star):
         provider = self._provider_config(user_config)
         if provider["type"] == "mteam":
             return await self._search_mteam(keyword, user_config, sort_by, descending)
+        if provider["type"] == "gaytorrents":
+            return await self._search_gaytorrents(
+                keyword, user_config, sort_by, descending
+            )
         base_url = provider["base_url"].rstrip("/") + "/"
         search_path = provider["search_path"]
         limit = self._int_config("max_results", 10, 1, 30, user_config)
@@ -801,6 +873,297 @@ class QBittorrentManagerPlugin(Star):
 
         return results
 
+    async def _search_gaytorrents(
+        self,
+        keyword: str,
+        user_config: dict[str, Any],
+        sort_by: str | None,
+        descending: bool,
+    ) -> list[TorrentResult]:
+        provider = self._provider_config(user_config)
+        limit = self._int_config("max_results", 10, 1, 30, user_config)
+        results: list[TorrentResult] = []
+        login_required = False
+        for attempt in range(2):
+            cookie = await self._gaytorrents_cookie(provider, user_config)
+            results, login_required = await self._fetch_gaytorrents_results(
+                provider, user_config, keyword, cookie, limit
+            )
+            if not login_required:
+                break
+            self._gt_sessions.pop(self._gaytorrents_session_key(provider), None)
+            if provider["cookie"]:
+                raise UserFacingError(
+                    "Gay-Torrents 登录状态无效，请在浏览器登录站点后重新复制 Cookie。"
+                )
+            if attempt == 1:
+                raise UserFacingError(
+                    "Gay-Torrents 自动登录后仍无法访问搜索结果，请检查账号和密码。"
+                )
+        return self._sort_results(results, sort_by, descending)
+
+    async def _fetch_gaytorrents_results(
+        self,
+        provider: dict[str, str],
+        user_config: dict[str, Any],
+        keyword: str,
+        cookie: str,
+        limit: int,
+    ) -> tuple[list[TorrentResult], bool]:
+        """分页调用 GT_ajax_search.php，返回（结果列表，是否需要重新登录）。"""
+        base_url = provider["base_url"].rstrip("/") + "/"
+        results: list[TorrentResult] = []
+        seen: set[str] = set()
+        # 站点搜索按 vBulletin 布尔模式工作，直接关键词为空时改用布尔写法重试。
+        queries = [
+            item
+            for item in dict.fromkeys([keyword, self._gaytorrents_query(keyword)])
+            if item
+        ]
+        async with self._http_client(
+            provider,
+            user_config,
+            cookie=cookie,
+            extra_headers={"Referer": base_url},
+        ) as client:
+            for query in queries:
+                for page in range(GAYTORRENTS_MAX_PAGES):
+                    response = await client.get(
+                        self._gaytorrents_search_url(provider, query, page)
+                    )
+                    self._raise_for_response(response, "Gay-Torrents 搜索失败")
+                    if self._gaytorrents_requires_login(response.text):
+                        return [], True
+                    rows = self._parse_gaytorrents_results(
+                        response.text, base_url, max(limit - len(results), 1)
+                    )
+                    fresh = [row for row in rows if row.download_url not in seen]
+                    seen.update(row.download_url for row in fresh)
+                    results.extend(fresh)
+                    if not rows or len(results) >= limit:
+                        break
+                if results:
+                    break
+
+        return results[:limit], False
+
+    @staticmethod
+    def _gaytorrents_search_url(
+        provider: dict[str, str], keyword: str, page: int
+    ) -> str:
+        url = urljoin(
+            provider["base_url"].rstrip("/") + "/",
+            provider["search_path"].format(keyword=quote(keyword)),
+        )
+        return QBittorrentManagerPlugin._merge_query_params(url, {"page": str(page)})
+
+    @staticmethod
+    def _merge_query_params(url: str, params: dict[str, str]) -> str:
+        parsed = urlparse(url)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key not in params
+        ]
+        query.extend(params.items())
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
+    @staticmethod
+    def _gaytorrents_query(keyword: str) -> str:
+        """按站点要求重写关键词：4 个字符以上的英文词加 +，with 是停用词。"""
+        words: list[str] = []
+        for word in keyword.split():
+            if word.lower() == "with":
+                continue
+            words.append(f"+{word}" if re.fullmatch(r"[A-Za-z0-9]{4,}", word) else word)
+        return " ".join(words)
+
+    @staticmethod
+    def _gaytorrents_requires_login(text: str) -> bool:
+        lowered = text.lower()
+        if "torrentdetails.php?torrentid=" in lowered:
+            return False
+        return (
+            "you are not logged in" in lowered
+            or 'securitytoken = "guest"' in lowered
+            or "vb_login_username" in lowered
+        )
+
+    def _parse_gaytorrents_results(
+        self,
+        html_text: str,
+        base_url: str,
+        limit: int,
+        allow_unescape: bool = True,
+    ) -> list[TorrentResult]:
+        soup = BeautifulSoup(html_text, "html.parser")
+        rows = soup.find_all("torrent")
+        if not rows:
+            rows = [
+                parent
+                for parent in (
+                    link.find_parent(["li", "tr", "div", "p"]) or link.parent
+                    for link in soup.find_all("a", href=GAYTORRENTS_DETAIL_HREF)
+                )
+                if parent is not None
+            ]
+        if (
+            allow_unescape
+            and rows
+            and not any(row.find("a", href=GAYTORRENTS_DETAIL_HREF) for row in rows)
+        ):
+            # 有的响应把条目 HTML 转义后放在标签文本里。
+            inner = "\n".join(html.unescape(row.get_text()) for row in rows)
+            return self._parse_gaytorrents_results(inner, base_url, limit, False)
+
+        results: list[TorrentResult] = []
+        for row in rows:
+            result = self._parse_gaytorrents_row(row, base_url)
+            if not result:
+                continue
+            results.append(replace(result, index=len(results) + 1))
+            if len(results) >= limit:
+                break
+
+        return results
+
+    def _parse_gaytorrents_row(self, row: Any, base_url: str) -> TorrentResult | None:
+        link = row.find("a", href=GAYTORRENTS_DETAIL_HREF)
+        if link is None or not link.get("href"):
+            return None
+        detail_url = urljoin(base_url, link["href"])
+        separator = "&" if "?" in detail_url else "?"
+        download_url = f"{detail_url}{separator}do=download"
+        raw_title = (link.get_text(" ", strip=True) or link.get("title") or "").strip()
+        if not raw_title:
+            return None
+        freeleech = bool(re.match(r"^\[F?FL\]", raw_title, re.IGNORECASE))
+        title = re.sub(r"^\[F?FL\]\s*", "", raw_title, flags=re.IGNORECASE).strip()
+        row_text = row.get_text(" ", strip=True)
+        size = self._gaytorrents_cell(row, "size") or self._extract_size(row_text)
+        return TorrentResult(
+            index=1,
+            title=title,
+            subtitle=self._gaytorrents_subtitle(row, freeleech),
+            size=size or "未知",
+            seeders=self._gaytorrents_cell(row, "seeders")
+            or GAYTORRENTS_UNKNOWN_COMPLETED,
+            leechers=self._gaytorrents_cell(row, "leechers")
+            or GAYTORRENTS_UNKNOWN_COMPLETED,
+            # 站点列表不提供完成次数，保持占位符。
+            completed=GAYTORRENTS_UNKNOWN_COMPLETED,
+            detail_url=detail_url,
+            download_url=download_url,
+            added_at=self._normalize_gaytorrents_date(
+                self._gaytorrents_cell(row, "added_at")
+            ),
+        )
+
+    @staticmethod
+    def _gaytorrents_cell(row: Any, field: str) -> str:
+        for class_name in GAYTORRENTS_CELL_CLASSES[field]:
+            cell = row.find(class_=re.compile(re.escape(class_name), re.IGNORECASE))
+            if cell:
+                text = cell.get_text(" ", strip=True)
+                if text:
+                    return text
+        return ""
+
+    def _gaytorrents_subtitle(self, row: Any, freeleech: bool) -> str:
+        parts: list[str] = []
+        category_link = row.find("a", href=GAYTORRENTS_CATEGORY_HREF)
+        if category_link and category_link.get("href"):
+            query = parse_qs(urlparse(category_link["href"]).query)
+            category = unquote(query.get("type", [""])[0]).strip().strip("/")
+            if category:
+                parts.append(category)
+        if freeleech:
+            parts.append("免费")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _normalize_gaytorrents_date(value: str) -> str:
+        """站点日期形如 HH:mm dd-MMM-yyyy，统一成 YYYY-MM-DD HH:mm 以支持按时间排序。"""
+        text = value.strip()
+        if not text:
+            return "未知"
+        match = re.search(r"(\d{1,2}):(\d{2})\s+(\d{1,2})-([A-Za-z]{3})-(\d{4})", text)
+        if match:
+            hour, minute, day, month_name, year = match.groups()
+            month = GAYTORRENTS_MONTHS.get(month_name.lower())
+            if month:
+                return f"{int(year):04d}-{month:02d}-{int(day):02d} {hour.zfill(2)}:{minute}"
+        match = re.search(r"(\d{1,2})-([A-Za-z]{3})-(\d{4})", text)
+        if match:
+            day, month_name, year = match.groups()
+            month = GAYTORRENTS_MONTHS.get(month_name.lower())
+            if month:
+                return f"{int(year):04d}-{month:02d}-{int(day):02d}"
+        return text
+
+    async def _gaytorrents_cookie(
+        self, provider: dict[str, str], user_config: dict[str, Any]
+    ) -> str:
+        if provider["cookie"]:
+            return provider["cookie"]
+        if not provider["username"] or not provider["password"]:
+            raise UserFacingError(
+                "Gay-Torrents 需要登录：请用 /种子配置 设置 cookie（登录后的 Cookie），"
+                "或设置 pt账号 和 pt密码 让插件自动登录。"
+            )
+        cache_key = self._gaytorrents_session_key(provider)
+        cached = self._gt_sessions.get(cache_key)
+        if cached and time.time() - cached[0] < GAYTORRENTS_SESSION_TTL_SECONDS:
+            return cached[1]
+        cookie = await self._login_gaytorrents(provider, user_config)
+        self._gt_sessions[cache_key] = (time.time(), cookie)
+        return cookie
+
+    @staticmethod
+    def _gaytorrents_session_key(provider: dict[str, str]) -> str:
+        return f"{provider['base_url']}|{provider['username']}"
+
+    async def _login_gaytorrents(
+        self, provider: dict[str, str], user_config: dict[str, Any]
+    ) -> str:
+        base_url = provider["base_url"].rstrip("/") + "/"
+        async with self._http_client(
+            provider,
+            user_config,
+            include_cookie=False,
+            extra_headers={"Referer": base_url},
+        ) as client:
+            response = await client.post(
+                urljoin(base_url, GAYTORRENTS_LOGIN_PATH),
+                data={
+                    "vb_login_username": provider["username"],
+                    "vb_login_password": provider["password"],
+                    "cookieuser": "1",
+                    "do": "login",
+                },
+            )
+            self._raise_for_response(response, "Gay-Torrents 登录失败")
+            check = await client.get(urljoin(base_url, GAYTORRENTS_LIST_PATH))
+            self._raise_for_response(check, "Gay-Torrents 登录校验失败")
+            cookie = "; ".join(
+                f"{name}={value}" for name, value in client.cookies.items()
+            )
+        if not self._gaytorrents_is_logged_in(check.text):
+            raise UserFacingError(
+                "Gay-Torrents 自动登录失败：请检查账号密码，站点可能开启了图片验证码。"
+            )
+        if not cookie:
+            raise UserFacingError("Gay-Torrents 登录成功但没有返回 Cookie。")
+        return cookie
+
+    @staticmethod
+    def _gaytorrents_is_logged_in(text: str) -> bool:
+        if BeautifulSoup is None:
+            return "isuser" in text.lower()
+        return (
+            BeautifulSoup(text, "html.parser").find("ul", class_="isuser") is not None
+        )
+
     async def _add_to_download_client(
         self, torrent: TorrentResult, user_config: dict[str, Any]
     ):
@@ -842,9 +1205,18 @@ class QBittorrentManagerPlugin(Star):
             return await self._download_mteam_torrent(
                 torrent.download_url.removeprefix("mteam:"), torrent.title, user_config
             )
-        async with self._http_client(provider, user_config) as pt_client:
-            torrent_response = await pt_client.get(torrent.download_url)
+        cookie = (
+            await self._gaytorrents_cookie(provider, user_config)
+            if provider["type"] == "gaytorrents"
+            else None
+        )
+        async with self._http_client(provider, user_config, cookie=cookie) as pt_client:
+            torrent_response = await pt_client.get(
+                torrent.download_url, headers={"Referer": torrent.detail_url}
+            )
             self._raise_for_response(torrent_response, "下载种子文件失败")
+            if provider["type"] == "gaytorrents":
+                self._ensure_gaytorrents_torrent(torrent, torrent_response)
 
         return TorrentFile(
             filename=self._safe_filename(torrent.title),
@@ -852,6 +1224,17 @@ class QBittorrentManagerPlugin(Star):
             content_type=mimetypes.types_map.get(
                 ".torrent", "application/x-bittorrent"
             ),
+        )
+
+    def _ensure_gaytorrents_torrent(
+        self, torrent: TorrentResult, response: httpx.Response
+    ):
+        """登录失效时站点会返回登录页而不是 .torrent，这里给出可读错误。"""
+        if self._looks_like_torrent_response(torrent.download_url, response):
+            return
+        raise UserFacingError(
+            "Gay-Torrents 没有返回种子文件，登录状态可能已失效，"
+            "请更新 Cookie 或账号配置。"
         )
 
     async def _download_mteam_torrent(
@@ -912,8 +1295,11 @@ class QBittorrentManagerPlugin(Star):
     ) -> TorrentFile:
         provider = self._provider_config(user_config)
         include_cookie = self._same_origin(uri, provider["base_url"])
+        cookie = None
+        if include_cookie and provider["type"] == "gaytorrents":
+            cookie = await self._gaytorrents_cookie(provider, user_config)
         async with self._http_client(
-            provider, user_config, include_cookie=include_cookie
+            provider, user_config, include_cookie=include_cookie, cookie=cookie
         ) as client:
             response = await client.get(uri)
             self._raise_for_response(response, "下载种子链接失败")
@@ -1202,25 +1588,36 @@ class QBittorrentManagerPlugin(Star):
             return None
 
     def _provider_config(self, user_config: dict[str, Any]) -> dict[str, str]:
-        provider_type = str(user_config.get("provider_type") or "nexusphp").strip().lower()
-        if provider_type in {"m-team", "mteam", "m_team", "api"}:
-            provider_type = "mteam"
-        else:
-            provider_type = "nexusphp"
-        base_url = (
-            user_config.get("provider_base_url")
-            or ("https://api.m-team.cc" if provider_type == "mteam" else "https://www.tjupt.org/")
-        ).strip()
-        search_path = (
-            user_config.get("mteam_search_path" if provider_type == "mteam" else "provider_search_path")
-            or ("/api/torrent/search" if provider_type == "mteam" else "torrents.php?search={keyword}&incldead=0")
-        ).strip()
+        provider_type = (
+            self._normalize_provider_type(user_config.get("provider_type"))
+            or "nexusphp"
+        )
+        defaults = DEFAULT_PROVIDER_CONFIG[provider_type]
+        search_key = (
+            "mteam_search_path" if provider_type == "mteam" else "provider_search_path"
+        )
+        base_url = (user_config.get("provider_base_url") or "").strip()
+        search_path = (user_config.get(search_key) or "").strip()
+        # 用户只切换站点类型时，内置默认地址/路径要跟着切换，否则会串站。
+        if base_url in BUILTIN_PROVIDER_BASE_URLS and base_url != defaults["base_url"]:
+            base_url = ""
+        if (
+            search_path in BUILTIN_PROVIDER_SEARCH_PATHS
+            and search_path != defaults["search_path"]
+        ):
+            search_path = ""
+        base_url = base_url or defaults["base_url"]
+        search_path = search_path or defaults["search_path"]
         cookie = (user_config.get("provider_cookie") or "").strip()
         api_token = (user_config.get("mteam_api_token") or "").strip()
-        download_path = (user_config.get("mteam_download_path") or "/api/torrent/genDlToken").strip()
+        download_path = (
+            user_config.get("mteam_download_path") or defaults.get("download_path", "")
+        ).strip()
+        username = (user_config.get("provider_username") or "").strip()
+        password = (user_config.get("provider_password") or "").strip()
         if not base_url:
             raise UserFacingError("未配置 PT 站点地址。")
-        if provider_type == "nexusphp" and "{keyword}" not in search_path:
+        if provider_type != "mteam" and "{keyword}" not in search_path:
             raise UserFacingError("搜索路径必须包含 {keyword} 占位符。")
         if provider_type == "mteam" and not api_token:
             raise UserFacingError("未配置 M-Team API Token。")
@@ -1231,7 +1628,20 @@ class QBittorrentManagerPlugin(Star):
             "cookie": cookie,
             "api_token": api_token,
             "download_path": download_path,
+            "username": username,
+            "password": password,
         }
+
+    @staticmethod
+    def _normalize_provider_type(value: Any) -> str:
+        normalized = re.sub(r"[\s\-_]", "", str(value or "").strip().lower())
+        if normalized in {"", "nexusphp", "nexus"}:
+            return "nexusphp"
+        if normalized in {"mteam", "mteamcc", "api"}:
+            return "mteam"
+        if normalized in GAYTORRENTS_PROVIDER_TYPES:
+            return "gaytorrents"
+        return ""
 
     def _qbittorrent_config(self, user_config: dict[str, Any]) -> dict[str, str]:
         qb_url = (user_config.get("qb_url") or "").strip().rstrip("/")
@@ -1279,6 +1689,8 @@ class QBittorrentManagerPlugin(Star):
         user_config: dict[str, Any],
         *,
         include_cookie: bool = True,
+        cookie: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> httpx.AsyncClient:
         headers = {
             "User-Agent": (
@@ -1286,8 +1698,11 @@ class QBittorrentManagerPlugin(Star):
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
             )
         }
-        if include_cookie and provider.get("cookie"):
-            headers["Cookie"] = provider["cookie"]
+        if extra_headers:
+            headers.update(extra_headers)
+        effective_cookie = cookie if cookie is not None else provider.get("cookie", "")
+        if include_cookie and effective_cookie:
+            headers["Cookie"] = effective_cookie
         return httpx.AsyncClient(
             headers=headers,
             timeout=self._float_config(
@@ -1493,12 +1908,10 @@ class QBittorrentManagerPlugin(Star):
             raise UserFacingError("PT 搜索路径必须包含 {keyword} 占位符。")
 
         if key == "provider_type":
-            normalized_provider = value.lower().replace("-", "").replace("_", "")
-            if normalized_provider in {"mteam", "api"}:
-                return "mteam"
-            if normalized_provider in {"nexusphp", "nexus"}:
-                return "nexusphp"
-            raise UserFacingError("站点类型只支持 nexusphp 或 mteam。")
+            normalized_provider = self._normalize_provider_type(value)
+            if not normalized_provider:
+                raise UserFacingError("站点类型只支持 gaytorrents、nexusphp 或 mteam。")
+            return normalized_provider
 
         if key in {"provider_base_url", "qb_url", "ut_url"}:
             parsed_url = urlparse(value)
@@ -2040,12 +2453,14 @@ class QBittorrentManagerPlugin(Star):
     @staticmethod
     def _help_text() -> str:
         return (
-            "种子下载助手：\n"
+            "种子下载助手（默认搜索 Gay-Torrents）：\n"
             "1. /种子 关键词 - 搜索 PT 站种子\n"
             "2. /种子 --sort=做种 --order=降序 -- 关键词 - 排序搜索\n"
             "3. /种子下载 序号... - 批量添加所选种子到下载客户端\n"
             "4. /直接下载 磁链或种子链接 - 直接添加下载任务\n"
             "5. /种子配置 帮助 - 配置自己的 PT 与下载客户端\n"
+            "Gay-Torrents 需要登录：/种子配置 设置 pt账号 你的账号，"
+            "再 /种子配置 设置 pt密码 你的密码。\n"
             "每位用户按 QQ 号使用独立配置。"
         )
 
@@ -2060,9 +2475,12 @@ class QBittorrentManagerPlugin(Star):
             "/种子配置 重置\n"
             "示例：/种子配置 设置 客户端 qbittorrent\n"
             "示例：/种子配置 设置 qb地址 http://127.0.0.1:8080\n"
-            "示例：/种子配置 设置 cookie access_token=你的值\n"
+            "示例：/种子配置 设置 pt账号 你的账号\n"
+            "示例：/种子配置 设置 pt密码 你的密码\n"
+            "示例：/种子配置 设置 cookie 登录后复制的 Cookie\n"
             f"常用配置项：{aliases}\n"
             "也可直接使用 AstrBot 面板中的英文配置键。\n"
+            "站点类型可选 gaytorrents、nexusphp、mteam。\n"
             "Cookie 和密码建议仅在私聊中设置。"
         )
 

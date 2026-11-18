@@ -1,26 +1,38 @@
 {
   "provider_type": {
-    "description": "PT 站点类型，可选 nexusphp 或 mteam。",
+    "description": "PT 站点类型，可选 gaytorrents、nexusphp 或 mteam。",
     "type": "string",
-    "hint": "nexusphp / mteam",
-    "default": "nexusphp"
+    "hint": "gaytorrents / nexusphp / mteam",
+    "default": "gaytorrents"
   },
   "provider_base_url": {
-    "description": "PT 站点地址，默认北洋园 PT。",
+    "description": "PT 站点地址，默认 Gay-Torrents。",
     "type": "string",
-    "hint": "https://www.tjupt.org/",
-    "default": "https://www.tjupt.org/"
+    "hint": "https://www.gay-torrents.net/",
+    "default": "https://www.gay-torrents.net/"
   },
   "provider_search_path": {
     "description": "搜索路径，必须包含 {keyword} 占位符。",
     "type": "string",
-    "hint": "torrents.php?search={keyword}&incldead=0",
-    "default": "torrents.php?search={keyword}&incldead=0"
+    "hint": "GT_torrents/GT_ajax_search.php?filename={keyword}",
+    "default": "GT_torrents/GT_ajax_search.php?filename={keyword}"
   },
   "provider_cookie": {
-    "description": "PT 站登录 Cookie，用于搜索和下载 .torrent 文件。",
+    "description": "PT 站登录 Cookie，用于搜索和下载 .torrent 文件。Gay-Torrents 留空时会用下面的账号密码自动登录。",
     "type": "string",
     "hint": "从浏览器开发者工具复制 Cookie 请求头",
+    "default": ""
+  },
+  "provider_username": {
+    "description": "PT 站账号，Gay-Torrents 自动登录使用。",
+    "type": "string",
+    "hint": "留空则只使用 Cookie",
+    "default": ""
+  },
+  "provider_password": {
+    "description": "PT 站密码，Gay-Torrents 自动登录使用。",
+    "type": "string",
+    "hint": "敏感信息，建议只在私聊用 /种子配置 设置",
     "default": ""
   },
   "mteam_api_token": {
@@ -178,23 +190,35 @@
           "provider_type": {
             "description": "PT 站点类型",
             "type": "string",
-            "options": ["nexusphp", "mteam"],
-            "default": "nexusphp"
+            "options": ["gaytorrents", "nexusphp", "mteam"],
+            "default": "gaytorrents"
           },
           "provider_base_url": {
             "description": "PT 站点地址",
             "type": "string",
-            "hint": "https://www.tjupt.org/",
-            "default": "https://www.tjupt.org/"
+            "hint": "https://www.gay-torrents.net/",
+            "default": "https://www.gay-torrents.net/"
           },
           "provider_search_path": {
             "description": "搜索路径",
             "type": "string",
             "hint": "必须包含 {keyword} 占位符。",
-            "default": "torrents.php?search={keyword}&incldead=0"
+            "default": "GT_torrents/GT_ajax_search.php?filename={keyword}"
           },
           "provider_cookie": {
             "description": "PT 站登录 Cookie",
+            "type": "string",
+            "hint": "敏感信息，请勿公开。",
+            "default": ""
+          },
+          "provider_username": {
+            "description": "PT 站账号",
+            "type": "string",
+            "hint": "Gay-Torrents 自动登录使用。",
+            "default": ""
+          },
+          "provider_password": {
+            "description": "PT 站密码",
             "type": "string",
             "hint": "敏感信息，请勿公开。",
             "default": ""
