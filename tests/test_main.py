@@ -992,9 +992,7 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_credentials_ask_for_cookie_or_account(self):
-        with self.assertRaisesRegex(
-            plugin_module.UserFacingError, "pt账号 和 pt密码"
-        ):
+        with self.assertRaisesRegex(plugin_module.UserFacingError, "pt账号 和 pt密码"):
             await self.instance._search_gaytorrents("tim", {}, None, True)
 
     async def test_expired_cookie_reports_invalid_login(self):
@@ -1078,6 +1076,65 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaisesRegex(plugin_module.UserFacingError, "自动登录失败"):
+            await self.instance._login_gaytorrents(provider, {})
+
+    def test_login_error_messages(self):
+        cases = {
+            '<div class="blockrow">You have entered an invalid username or '
+            "password. Please try again.</div>": "账号或密码不正确",
+            '<img src="image.php?do=verify&amp;t=1" />': "图片验证码",
+            "<div>You have exceeded too many login attempts</div>": "暂时锁定",
+        }
+        for html, expected in cases.items():
+            with self.subTest(html=html):
+                self.assertIn(
+                    expected,
+                    plugin_module.QBittorrentManagerPlugin._gaytorrents_login_error(
+                        html
+                    ),
+                )
+        self.assertEqual(
+            plugin_module.QBittorrentManagerPlugin._gaytorrents_login_error(
+                GT_ROWS_HTML
+            ),
+            "",
+        )
+
+    async def test_invalid_credentials_report_specific_message(self):
+        class FakeClient:
+            def __init__(self):
+                self.cookies = plugin_module.httpx.Cookies()
+                self.gets = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, data=None, **kwargs):
+                return plugin_module.httpx.Response(
+                    200,
+                    text=(
+                        '<div class="blockrow">You have entered an invalid username '
+                        "or password. Please enter the correct details.</div>"
+                    ),
+                )
+
+            async def get(self, url, headers=None, **kwargs):
+                self.gets.append(url)
+                return plugin_module.httpx.Response(200, text=GT_LOGIN_PAGE_HTML)
+
+        self.install_client(FakeClient)
+        provider = self.instance._provider_config(
+            {
+                "provider_type": "gaytorrents",
+                "provider_username": "tester",
+                "provider_password": "pw",
+            }
+        )
+
+        with self.assertRaisesRegex(plugin_module.UserFacingError, "账号或密码不正确"):
             await self.instance._login_gaytorrents(provider, {})
 
 

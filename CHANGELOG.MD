@@ -11,6 +11,7 @@
 - 解析 `<torrent>` 行（兼容旧版 `TorrentList3/6/7/8` 类名），提取标题、分类、免费标记（`[FL]` / `[FFL]`）、大小、做种数、下载数和发布时间（`HH:mm dd-MMM-yyyy` 归一化为 `YYYY-MM-DD HH:mm`）；站点列表不提供完成数，显示为 `?`。
 - 新增 `provider_username` / `provider_password`（命令别名 `pt账号` / `pt密码`）。未配置 Cookie 时插件会用账号密码登录 `login.php` 并缓存会话 Cookie（默认 6 小时）；登录失效或站点没有返回 `.torrent` 时给出中文提示。
 - 搜索结果排序改为本地执行，因为 Gay-Torrents 的搜索接口不接受排序参数。
+- 自动登录会识别站点返回的 `invalid username or password`、图片验证码与登录锁定文案，分别提示「账号或密码不正确」「需要图片验证码」「登录尝试过多」。
 - 同步更新 `_conf_schema.json`、README 和单元测试（新增 Gay-Torrents 站点配置、结果解析、登录会话与下载校验测试）。
 
 ## [1.7.1] - 2026-09-12

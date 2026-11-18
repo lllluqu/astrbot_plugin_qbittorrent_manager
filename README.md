@@ -122,17 +122,22 @@ QQ 用户独立配置 > AstrBot 面板全局默认配置 > 插件内置默认值
 
 Gay-Torrents 需要登录才能搜索和下载，插件支持两种方式：
 
-1. **填写 Cookie**：在浏览器登录站点后，从开发者工具的请求头复制完整 Cookie，通常形如：
+1. **填写 Cookie**：先在浏览器登录站点（登录成功后会跳到 `https://www.gay-torrents.net/latest/`），然后在开发者工具 **网络（Network）** 面板里刷新页面，点开第一个文档请求，复制 **请求头** 中的完整 `Cookie:`，通常形如：
 
    ```text
    ENvbbuserid=你的用户ID; ENvbbpasswordhash=你的密码哈希; ENvbbsessionhash=会话哈希
    ```
 
-   只有 `ENvbbsessionhash` 这类访客 Cookie 是不够的，必须包含 `ENvbbuserid` 和 `ENvbbpasswordhash`。
+   注意事项：
 
-2. **账号密码自动登录**：设置 `pt账号` 和 `pt密码`，插件会向 `login.php` 提交 `vb_login_username` / `vb_login_password` 并复用站点返回的会话 Cookie（默认缓存 6 小时）。若站点启用了图片验证码或异常登录保护，自动登录会失败，请改用 Cookie。
+   - 登录时勾选 **Remember Me**，否则 `ENvbbuserid` / `ENvbbpasswordhash` 可能不存在。
+   - 这两项是 HttpOnly Cookie，`document.cookie` 和部分「Cookie 编辑器」读不到，必须从 Network 请求头或 Application → Cookies 面板复制。
+   - 只有 `ENvbb_sessionhash` / `ENvbb_lastvisit` 这类访客 Cookie 是不够的，站点仍会按未登录处理。
+   - 复制后可在同一页面用「退出登录后重新打开 `/latest/`」反向确认：有效 Cookie 返回种子列表，无效则返回「You are not logged in or you do not have permission…」。
 
-未登录时站点会返回登录页而不是搜索结果，插件会提示「需要登录」。Cookie 等同登录凭证，请不要发到群聊、截图或公开仓库中。
+2. **账号密码自动登录**：设置 `pt账号` 和 `pt密码`，插件会向 `login.php` 提交 `vb_login_username` / `vb_login_password` / `cookieuser=1` / `do=login` 并复用站点返回的会话 Cookie（默认缓存 6 小时）。实测该表单不需要 CSRF 令牌；口令错误时站点返回「You have entered an invalid username or password」，插件会直接提示「账号或密码不正确」。若站点启用了图片验证码或登录锁定，插件也会给出对应提示，此时请改用 Cookie。
+
+未登录时站点会返回权限错误页而不是搜索结果，插件会提示「需要登录」而不会静默返回 0 条结果。Cookie 等同登录凭证，请不要发到群聊、截图或公开仓库中。
 
 ### NexusPHP 站点
 

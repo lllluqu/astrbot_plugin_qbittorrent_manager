@@ -119,6 +119,20 @@ GAYTORRENTS_CELL_CLASSES = {
 }
 # 列表页不提供完成次数，猜测未验证的 class 只会带来错误数据，因此固定为 “?”。
 GAYTORRENTS_UNKNOWN_COMPLETED = "?"
+# 登录失败时站点在 div.blockrow 里给出的原文（已对站点实测确认）。
+GAYTORRENTS_CAPTCHA_ERROR = (
+    "Gay-Torrents 自动登录失败：站点要求图片验证码，请改用登录后的 Cookie。"
+)
+GAYTORRENTS_LOCKED_ERROR = (
+    "Gay-Torrents 登录尝试过多，账号或 IP 已被暂时锁定，请稍后再试。"
+)
+GAYTORRENTS_LOGIN_ERRORS = (
+    ("invalid username or password", "Gay-Torrents 自动登录失败：账号或密码不正确。"),
+    ("image verify", GAYTORRENTS_CAPTCHA_ERROR),
+    ("image.php?do=verify", GAYTORRENTS_CAPTCHA_ERROR),
+    ("too many login", GAYTORRENTS_LOCKED_ERROR),
+    ("temporarily locked", GAYTORRENTS_LOCKED_ERROR),
+)
 GAYTORRENTS_MONTHS = {
     "jan": 1,
     "feb": 2,
@@ -1143,6 +1157,9 @@ class QBittorrentManagerPlugin(Star):
                 },
             )
             self._raise_for_response(response, "Gay-Torrents 登录失败")
+            login_error = self._gaytorrents_login_error(response.text)
+            if login_error:
+                raise UserFacingError(login_error)
             check = await client.get(urljoin(base_url, GAYTORRENTS_LIST_PATH))
             self._raise_for_response(check, "Gay-Torrents 登录校验失败")
             cookie = "; ".join(
@@ -1150,11 +1167,20 @@ class QBittorrentManagerPlugin(Star):
             )
         if not self._gaytorrents_is_logged_in(check.text):
             raise UserFacingError(
-                "Gay-Torrents 自动登录失败：请检查账号密码，站点可能开启了图片验证码。"
+                "Gay-Torrents 自动登录失败：站点没有确认登录，"
+                "请检查账号密码，或改用登录后的 Cookie。"
             )
         if not cookie:
             raise UserFacingError("Gay-Torrents 登录成功但没有返回 Cookie。")
         return cookie
+
+    @staticmethod
+    def _gaytorrents_login_error(text: str) -> str:
+        lowered = text.lower()
+        for marker, message in GAYTORRENTS_LOGIN_ERRORS:
+            if marker in lowered:
+                return message
+        return ""
 
     @staticmethod
     def _gaytorrents_is_logged_in(text: str) -> bool:
