@@ -907,6 +907,12 @@ class QBittorrentManagerPlugin(Star):
                 break
             self._gt_sessions.pop(self._gaytorrents_session_key(provider), None)
             if provider["cookie"]:
+                if self._gaytorrents_cookie_is_guest(provider["cookie"]):
+                    raise UserFacingError(
+                        "Gay-Torrents 的 Cookie 缺少登录字段（ENvbb_userid、"
+                        "ENvbb_passwordhash），站点仍按访客处理。请在浏览器登录并勾选"
+                        " Remember Me，再从开发者工具的请求头复制完整 Cookie。"
+                    )
                 raise UserFacingError(
                     "Gay-Torrents 登录状态无效，请在浏览器登录站点后重新复制 Cookie。"
                 )
@@ -1002,6 +1008,14 @@ class QBittorrentManagerPlugin(Star):
             or 'securitytoken = "guest"' in lowered
             or "vb_login_username" in lowered
         )
+
+    @staticmethod
+    def _gaytorrents_cookie_is_guest(cookie: str) -> bool:
+        """Cookie 里缺少 vBulletin 登录字段（ENvbb_userid / ENvbb_passwordhash）时为访客。"""
+        names = [part.split("=", 1)[0].strip().lower() for part in cookie.split(";")]
+        has_user = any(name.endswith("userid") for name in names)
+        has_hash = any(name.endswith("passwordhash") for name in names)
+        return not (has_user and has_hash)
 
     def _parse_gaytorrents_results(
         self,

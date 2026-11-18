@@ -953,8 +953,8 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
 
             async def post(self, url, data=None, **kwargs):
                 posted.append((url, data))
-                self.cookies.set("ENvbbuserid", "17")
-                self.cookies.set("ENvbbpasswordhash", "hash")
+                self.cookies.set("ENvbb_userid", "17")
+                self.cookies.set("ENvbb_passwordhash", "hash")
                 return plugin_module.httpx.Response(200, text="Logged in")
 
             async def get(self, url, headers=None, **kwargs):
@@ -981,14 +981,14 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posted[0][1]["do"], "login")
         self.assertEqual(
             set(calls[-1]["cookie"].split("; ")),
-            {"ENvbbuserid=17", "ENvbbpasswordhash=hash"},
+            {"ENvbb_userid=17", "ENvbb_passwordhash=hash"},
         )
         cached_cookie = self.instance._gt_sessions[
             "https://www.gay-torrents.net/|tester"
         ][1]
         self.assertEqual(
             set(cached_cookie.split("; ")),
-            {"ENvbbuserid=17", "ENvbbpasswordhash=hash"},
+            {"ENvbb_userid=17", "ENvbb_passwordhash=hash"},
         )
 
     async def test_missing_credentials_ask_for_cookie_or_account(self):
@@ -1011,7 +1011,38 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(plugin_module.UserFacingError, "登录状态无效"):
             await self.instance._search_gaytorrents(
                 "tim",
-                {"provider_type": "gaytorrents", "provider_cookie": "stale=1"},
+                {
+                    "provider_type": "gaytorrents",
+                    "provider_cookie": (
+                        "ENvbb_userid=17; ENvbb_passwordhash=old; ENvbb_sessionhash=x"
+                    ),
+                },
+                None,
+                True,
+            )
+
+    async def test_guest_cookie_explains_missing_login_fields(self):
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def get(self, url, headers=None, **kwargs):
+                return plugin_module.httpx.Response(200, text=GT_LOGIN_PAGE_HTML)
+
+        self.install_client(FakeClient)
+
+        with self.assertRaisesRegex(plugin_module.UserFacingError, "缺少登录字段"):
+            await self.instance._search_gaytorrents(
+                "tim",
+                {
+                    "provider_type": "gaytorrents",
+                    "provider_cookie": (
+                        "ENvbb_lastvisit=1795011326; ENvbb_sessionhash=abc"
+                    ),
+                },
                 None,
                 True,
             )
@@ -1028,7 +1059,7 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
                 return False
 
             async def post(self, url, data=None, **kwargs):
-                self.cookies.set("ENvbbuserid", "17")
+                self.cookies.set("ENvbb_userid", "17")
                 return plugin_module.httpx.Response(200, text="Logged in")
 
             async def get(self, url, headers=None, **kwargs):
@@ -1062,7 +1093,7 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
                 return False
 
             async def post(self, url, data=None, **kwargs):
-                self.cookies.set("ENvbbuserid", "17")
+                self.cookies.set("ENvbb_userid", "17")
                 return plugin_module.httpx.Response(
                     200, text='<div class="blockrow">Invalid username or password</div>'
                 )

@@ -125,12 +125,12 @@ Gay-Torrents 需要登录才能搜索和下载，插件支持两种方式：
 1. **填写 Cookie**：先在浏览器登录站点（登录成功后会跳到 `https://www.gay-torrents.net/latest/`），然后在开发者工具 **网络（Network）** 面板里刷新页面，点开第一个文档请求，复制 **请求头** 中的完整 `Cookie:`，通常形如：
 
    ```text
-   ENvbbuserid=你的用户ID; ENvbbpasswordhash=你的密码哈希; ENvbbsessionhash=会话哈希
+   ENvbb_userid=你的用户ID; ENvbb_passwordhash=你的密码哈希; ENvbb_sessionhash=会话哈希
    ```
 
    注意事项：
 
-   - 登录时勾选 **Remember Me**，否则 `ENvbbuserid` / `ENvbbpasswordhash` 可能不存在。
+   - 登录时勾选 **Remember Me**，否则 `ENvbb_userid` / `ENvbb_passwordhash` 可能不存在。
    - 这两项是 HttpOnly Cookie，`document.cookie` 和部分「Cookie 编辑器」读不到，必须从 Network 请求头或 Application → Cookies 面板复制。
    - 只有 `ENvbb_sessionhash` / `ENvbb_lastvisit` 这类访客 Cookie 是不够的，站点仍会按未登录处理。
    - 复制后可在同一页面用「退出登录后重新打开 `/latest/`」反向确认：有效 Cookie 返回种子列表，无效则返回「You are not logged in or you do not have permission…」。
