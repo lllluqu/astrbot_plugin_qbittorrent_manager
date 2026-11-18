@@ -739,6 +739,37 @@ permission to access this page.</div>
 <form><input type="text" name="vb_login_username"></form></body></html>
 """
 
+# GT_ajax_search.php 的真实响应形态：XML 外壳 + CDATA 包裹的行 HTML。
+GT_SEARCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<searchresult>
+\t<torrent>
+\t\t<torrentdata><![CDATA[<div id="display"><ul class="Torrent-List  TListSnatched">
+\t<li class="Torrent-List-Image"><a href="torrentslist.php?type=nonporn/Drama"><img src="Drama.gif"></a></li>
+\t<li class="Torrent-List-FL">&nbsp;</li>
+\t<li class="Torrent-List-Name-ns"><a class="ajax_popup_class" data-querystring="id=abc123" href="torrentdetails.php?torrentid=abc123">Jonathan Glazer - Sexy Beast (2000) UK</a></li>
+\t<li class="Torrent-List-Size">2.92 GiB</li>
+\t<li class="Torrent-List-Mod-ns">&nbsp;</li>
+\t<li class="Torrent-List-UL-ns"><a href="torrents_user_list.php?user=fusain">fusain</a></li>
+\t<li class="Torrent-List-Seeds">11|</li>
+\t<li class="Torrent-List-Peers">   0</li>
+\t<li class="Torrent-List-Date">04:38 02-Oct-2026</li>
+</ul></div>]]></torrentdata>
+\t</torrent>
+\t<torrent>
+\t\t<torrentdata><![CDATA[<ul class="Torrent-List ">
+\t<li class="Torrent-List-FL">Free</li>
+\t<li class="Torrent-List-Name-ns"><a href="torrentdetails.php?torrentid=def456">Some Free Torrent</a></li>
+\t<li class="Torrent-List-Size">749.46 MiB</li>
+\t<li class="Torrent-List-Seeds">3|</li>
+\t<li class="Torrent-List-Peers">1</li>
+\t<li class="Torrent-List-Date">19:54 03-Sep-2026</li>
+</ul>]]></torrentdata>
+\t</torrent>
+\t<torrentcount><count>533</count></torrentcount>
+\t<maxtorrents><count>20</count></maxtorrents>
+</searchresult>
+"""
+
 
 class GayTorrentsProviderTests(unittest.TestCase):
     def test_default_provider_is_gaytorrents(self):
@@ -839,6 +870,30 @@ class GayTorrentsParserTests(unittest.TestCase):
         self.assertEqual(second.subtitle, "Games")
         self.assertEqual(second.added_at, "2025-01-01 09:00")
 
+    def test_parses_ajax_search_xml_payload(self):
+        results = self.instance._parse_gaytorrents_results(
+            GT_SEARCH_XML, "https://www.gay-torrents.net/", 10
+        )
+
+        self.assertEqual(len(results), 2)
+        first, second = results
+        self.assertEqual(first.title, "Jonathan Glazer - Sexy Beast (2000) UK")
+        self.assertEqual(first.subtitle, "nonporn/Drama")
+        self.assertEqual(first.size, "2.92 GiB")
+        self.assertEqual(first.seeders, "11")
+        self.assertEqual(first.leechers, "0")
+        self.assertEqual(first.completed, "?")
+        self.assertEqual(first.added_at, "2026-10-02 04:38")
+        self.assertEqual(
+            first.detail_url,
+            "https://www.gay-torrents.net/torrentdetails.php?torrentid=abc123",
+        )
+        self.assertEqual(
+            first.download_url,
+            "https://www.gay-torrents.net/torrentdetails.php?torrentid=abc123&do=download",
+        )
+        self.assertEqual(second.subtitle, "免费")
+
     def test_falls_back_to_anchor_parent(self):
         html_text = """
         <ul><li class="Torrent-Item">
@@ -874,6 +929,21 @@ class GayTorrentsParserTests(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 1)
+
+    def test_cookie_guest_detection_accepts_both_password_fields(self):
+        self.assertTrue(
+            self.instance._gaytorrents_cookie_is_guest("ENvbb_sessionhash=x")
+        )
+        self.assertFalse(
+            self.instance._gaytorrents_cookie_is_guest(
+                "ENvbb_userid=17; ENvbb_password=hash"
+            )
+        )
+        self.assertFalse(
+            self.instance._gaytorrents_cookie_is_guest(
+                "ENvbb_userid=17; ENvbb_passwordhash=hash"
+            )
+        )
 
     def test_detects_login_required_pages(self):
         self.assertTrue(self.instance._gaytorrents_requires_login(GT_LOGIN_PAGE_HTML))
@@ -954,7 +1024,7 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
             async def post(self, url, data=None, **kwargs):
                 posted.append((url, data))
                 self.cookies.set("ENvbb_userid", "17")
-                self.cookies.set("ENvbb_passwordhash", "hash")
+                self.cookies.set("ENvbb_password", "hash")
                 return plugin_module.httpx.Response(200, text="Logged in")
 
             async def get(self, url, headers=None, **kwargs):
@@ -981,14 +1051,14 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posted[0][1]["do"], "login")
         self.assertEqual(
             set(calls[-1]["cookie"].split("; ")),
-            {"ENvbb_userid=17", "ENvbb_passwordhash=hash"},
+            {"ENvbb_userid=17", "ENvbb_password=hash"},
         )
         cached_cookie = self.instance._gt_sessions[
             "https://www.gay-torrents.net/|tester"
         ][1]
         self.assertEqual(
             set(cached_cookie.split("; ")),
-            {"ENvbb_userid=17", "ENvbb_passwordhash=hash"},
+            {"ENvbb_userid=17", "ENvbb_password=hash"},
         )
 
     async def test_missing_credentials_ask_for_cookie_or_account(self):

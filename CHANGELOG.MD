@@ -8,8 +8,9 @@
 
 - 新增 `provider_type=gaytorrents`，搜索 [Gay-Torrents](https://www.gay-torrents.net/) 的 `GT_torrents/GT_ajax_search.php` 结果，并将其设为默认站点；NexusPHP 与 M-Team 适配保持不变，可随时切回。
 - 搜索会先按原关键词查询，再用站点自身的布尔语法（4 个字符以上的词加 `+`、忽略停用词 `with`）重试，读取前 5 页结果，按种子链接去重后截断到 `max_results`。
-- 解析 `<torrent>` 行（兼容旧版 `TorrentList3/6/7/8` 类名），提取标题、分类、免费标记（`[FL]` / `[FFL]`）、大小、做种数、下载数和发布时间（`HH:mm dd-MMM-yyyy` 归一化为 `YYYY-MM-DD HH:mm`）；站点列表不提供完成数，显示为 `?`。
+- 解析搜索接口返回的 XML 响应（每条种子包在 `<torrentdata><![CDATA[ … ]]>` 里），按 `Torrent-List-*` 类名提取标题、分类、免费标记（`Torrent-List-FL` 单元格或 `[FL]` / `[FFL]` 前缀）、大小、做种数、下载数和发布时间（`HH:mm dd-MMM-yyyy` 归一化为 `YYYY-MM-DD HH:mm`）；做种/下载数列可能是 `11|` 这类带符号的文本，只取其中的数字；站点列表不提供完成数，显示为 `?`。旧的 `<torrent>` 行结构与 `TorrentList3/6/7/8` 类名仍作为回退支持。
 - 新增 `provider_username` / `provider_password`（命令别名 `pt账号` / `pt密码`）。未配置 Cookie 时插件会用账号密码登录 `login.php` 并缓存会话 Cookie（默认 6 小时）；登录失效或站点没有返回 `.torrent` 时给出中文提示。
+- 实测站点登录后的 Cookie 字段是 `ENvbb_userid` / `ENvbb_password` / `ENvbb_sessionhash`，缺少登录字段的访客 Cookie 会直接提示，不再静默返回 0 条结果。
 - 搜索结果排序改为本地执行，因为 Gay-Torrents 的搜索接口不接受排序参数。
 - 自动登录会识别站点返回的 `invalid username or password`、图片验证码与登录锁定文案，分别提示「账号或密码不正确」「需要图片验证码」「登录尝试过多」。
 - 同步更新 `_conf_schema.json`、README 和单元测试（新增 Gay-Torrents 站点配置、结果解析、登录会话与下载校验测试）。

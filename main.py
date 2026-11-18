@@ -110,12 +110,17 @@ GAYTORRENTS_SESSION_TTL_SECONDS = 6 * 3600
 GAYTORRENTS_PROVIDER_TYPES = {"gaytorrents", "gaytorrentsnet", "gt", "gayt"}
 GAYTORRENTS_DETAIL_HREF = re.compile(r"torrentdetails\.php\?torrentid=", re.IGNORECASE)
 GAYTORRENTS_CATEGORY_HREF = re.compile(r"torrentslist\.php\?type=", re.IGNORECASE)
+# 搜索接口返回 <searchresult><torrent><torrentdata><![CDATA[ 行 HTML ]]></torrentdata>。
+GAYTORRENTS_TORRENTDATA_PATTERN = re.compile(
+    r"<torrentdata\b[^>]*>(.*?)</torrentdata>", re.IGNORECASE | re.DOTALL
+)
 # 列表页的两种 class 命名（新版 Torrent-List-*，旧版 TorrentListN）。
 GAYTORRENTS_CELL_CLASSES = {
     "size": ("Torrent-List-Size", "TorrentList3"),
     "seeders": ("Torrent-List-Seeds", "TorrentList6"),
     "leechers": ("Torrent-List-Peers", "TorrentList7"),
     "added_at": ("Torrent-List-Date", "TorrentList8"),
+    "freeleech": ("Torrent-List-FL",),
 }
 # 列表页不提供完成次数，猜测未验证的 class 只会带来错误数据，因此固定为 “?”。
 GAYTORRENTS_UNKNOWN_COMPLETED = "?"
@@ -910,7 +915,7 @@ class QBittorrentManagerPlugin(Star):
                 if self._gaytorrents_cookie_is_guest(provider["cookie"]):
                     raise UserFacingError(
                         "Gay-Torrents 的 Cookie 缺少登录字段（ENvbb_userid、"
-                        "ENvbb_passwordhash），站点仍按访客处理。请在浏览器登录并勾选"
+                        "ENvbb_password），站点仍按访客处理。请在浏览器登录并勾选"
                         " Remember Me，再从开发者工具的请求头复制完整 Cookie。"
                     )
                 raise UserFacingError(
@@ -1011,11 +1016,13 @@ class QBittorrentManagerPlugin(Star):
 
     @staticmethod
     def _gaytorrents_cookie_is_guest(cookie: str) -> bool:
-        """Cookie 里缺少 vBulletin 登录字段（ENvbb_userid / ENvbb_passwordhash）时为访客。"""
+        """Cookie 缺少 vBulletin 登录字段（ENvbb_userid / ENvbb_password）时为访客。"""
         names = [part.split("=", 1)[0].strip().lower() for part in cookie.split(";")]
         has_user = any(name.endswith("userid") for name in names)
-        has_hash = any(name.endswith("passwordhash") for name in names)
-        return not (has_user and has_hash)
+        has_password = any(
+            name.endswith(("passwordhash", "password")) for name in names
+        )
+        return not (has_user and has_password)
 
     def _parse_gaytorrents_results(
         self,
@@ -1024,6 +1031,10 @@ class QBittorrentManagerPlugin(Star):
         limit: int,
         allow_unescape: bool = True,
     ) -> list[TorrentResult]:
+        fragments = self._gaytorrents_row_fragments(html_text)
+        if fragments:
+            return self._parse_gaytorrents_fragments(fragments, base_url, limit)
+
         soup = BeautifulSoup(html_text, "html.parser")
         rows = soup.find_all("torrent")
         if not rows:
@@ -1055,6 +1066,32 @@ class QBittorrentManagerPlugin(Star):
 
         return results
 
+    @staticmethod
+    def _gaytorrents_row_fragments(html_text: str) -> list[str]:
+        """GT_ajax_search.php 返回 XML，行 HTML 包在 <torrentdata> 的 CDATA 里。"""
+        fragments: list[str] = []
+        for block in GAYTORRENTS_TORRENTDATA_PATTERN.findall(html_text):
+            body = block.strip().removeprefix("<![CDATA[").removesuffix("]]>")
+            if "torrentdetails.php" in body:
+                fragments.append(body)
+        return fragments
+
+    def _parse_gaytorrents_fragments(
+        self, fragments: list[str], base_url: str, limit: int
+    ) -> list[TorrentResult]:
+        results: list[TorrentResult] = []
+        for fragment in fragments:
+            result = self._parse_gaytorrents_row(
+                BeautifulSoup(fragment, "html.parser"), base_url
+            )
+            if not result:
+                continue
+            results.append(replace(result, index=len(results) + 1))
+            if len(results) >= limit:
+                break
+
+        return results
+
     def _parse_gaytorrents_row(self, row: Any, base_url: str) -> TorrentResult | None:
         link = row.find("a", href=GAYTORRENTS_DETAIL_HREF)
         if link is None or not link.get("href"):
@@ -1065,27 +1102,44 @@ class QBittorrentManagerPlugin(Star):
         raw_title = (link.get_text(" ", strip=True) or link.get("title") or "").strip()
         if not raw_title:
             return None
-        freeleech = bool(re.match(r"^\[F?FL\]", raw_title, re.IGNORECASE))
+        # 行内容以种子链接所在的 <ul> 为准，避免同一个块里的多条种子互相串数据。
+        scope = link.find_parent("ul") or row
+        freeleech = self._gaytorrents_freeleech(scope, raw_title)
         title = re.sub(r"^\[F?FL\]\s*", "", raw_title, flags=re.IGNORECASE).strip()
-        row_text = row.get_text(" ", strip=True)
-        size = self._gaytorrents_cell(row, "size") or self._extract_size(row_text)
+        row_text = scope.get_text(" ", strip=True)
+        size = self._gaytorrents_cell(scope, "size") or self._extract_size(row_text)
         return TorrentResult(
             index=1,
             title=title,
-            subtitle=self._gaytorrents_subtitle(row, freeleech),
+            subtitle=self._gaytorrents_subtitle(scope, freeleech),
             size=size or "未知",
-            seeders=self._gaytorrents_cell(row, "seeders")
-            or GAYTORRENTS_UNKNOWN_COMPLETED,
-            leechers=self._gaytorrents_cell(row, "leechers")
-            or GAYTORRENTS_UNKNOWN_COMPLETED,
+            seeders=self._gaytorrents_counter(scope, "seeders"),
+            leechers=self._gaytorrents_counter(scope, "leechers"),
             # 站点列表不提供完成次数，保持占位符。
             completed=GAYTORRENTS_UNKNOWN_COMPLETED,
             detail_url=detail_url,
             download_url=download_url,
             added_at=self._normalize_gaytorrents_date(
-                self._gaytorrents_cell(row, "added_at")
+                self._gaytorrents_cell(scope, "added_at")
             ),
         )
+
+    def _gaytorrents_counter(self, row: Any, field: str) -> str:
+        """做种/下载数列可能是 “11|” 或带空格，取第一段数字。"""
+        match = re.search(r"\d[\d,.]*", self._gaytorrents_cell(row, field))
+        return (
+            match.group(0).replace(",", "") if match else GAYTORRENTS_UNKNOWN_COMPLETED
+        )
+
+    def _gaytorrents_freeleech(self, row: Any, title: str) -> bool:
+        if re.match(r"^\[F?FL\]", title, flags=re.IGNORECASE):
+            return True
+        # 搜索接口的 Torrent-List-FL 单元格只在免费种子里有内容，普通种子只有 &nbsp;。
+        if self._gaytorrents_cell(row, "freeleech"):
+            return True
+        marker = row.find(class_=re.compile("Torrent-List-FL", re.IGNORECASE))
+        image = marker.find("img") if marker else None
+        return bool(image and "free" in str(image.get("src", "")).lower())
 
     @staticmethod
     def _gaytorrents_cell(row: Any, field: str) -> str:
