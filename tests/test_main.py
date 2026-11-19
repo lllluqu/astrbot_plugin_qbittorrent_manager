@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import importlib
 import inspect
 import sys
@@ -21,6 +23,18 @@ def _install_astrbot_stubs():
         def exception(self, *_args, **_kwargs):
             pass
 
+        def warning(self, *_args, **_kwargs):
+            pass
+
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+        def error(self, *_args, **_kwargs):
+            pass
+
     class CommandGroup:
         def command(self, *_args, **_kwargs):
             return lambda handler: handler
@@ -39,6 +53,20 @@ def _install_astrbot_stubs():
     class GreedyStr(str):
         pass
 
+    class Plain:
+        def __init__(self, text, convert=True):
+            self.text = text
+            self.convert = convert
+
+    class At:
+        def __init__(self, qq, name=""):
+            self.qq = qq
+            self.name = name
+
+    class MessageChain:
+        def __init__(self, chain=None):
+            self.chain = list(chain or [])
+
     api.logger = Logger()
     event_api.AstrMessageEvent = object
     event_api.filter = Filter()
@@ -47,15 +75,25 @@ def _install_astrbot_stubs():
     star_api.register = lambda *_args, **_kwargs: lambda cls: cls
     command.GreedyStr = GreedyStr
 
+    message_components = types.ModuleType("astrbot.api.message_components")
+    message_components.At = At
+    message_components.Plain = Plain
+    core_message = types.ModuleType("astrbot.core.message")
+    message_event_result = types.ModuleType("astrbot.core.message.message_event_result")
+    message_event_result.MessageChain = MessageChain
+
     modules = {
         "astrbot": astrbot,
         "astrbot.api": api,
         "astrbot.api.event": event_api,
         "astrbot.api.star": star_api,
+        "astrbot.api.message_components": message_components,
         "astrbot.core": core,
         "astrbot.core.star": core_star,
         "astrbot.core.star.filter": core_filter,
         "astrbot.core.star.filter.command": command,
+        "astrbot.core.message": core_message,
+        "astrbot.core.message.message_event_result": message_event_result,
     }
     sys.modules.update(modules)
 
@@ -74,9 +112,11 @@ class SavingConfig(dict):
 
 
 class FakeEvent:
-    def __init__(self, user_id, *, admin=False):
+    def __init__(self, user_id, *, admin=False, session="", private=False):
         self.user_id = user_id
         self.admin = admin
+        self.unified_msg_origin = session
+        self.private = private
 
     def get_sender_id(self):
         return self.user_id
@@ -84,8 +124,26 @@ class FakeEvent:
     def is_admin(self):
         return self.admin
 
+    def is_private_chat(self):
+        return self.private
+
     def plain_result(self, message):
         return message
+
+
+class FakeContext:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, session, chain):
+        self.sent.append((session, chain))
+        return True
+
+
+def chain_text(chain):
+    return "".join(
+        component.text for component in chain.chain if hasattr(component, "text")
+    )
 
 
 def make_plugin(config):
@@ -96,6 +154,9 @@ def make_plugin(config):
     instance._config_lock = asyncio.Lock()
     instance._search_cache = {}
     instance._gt_sessions = {}
+    instance._download_watches = {}
+    instance._monitor_task = None
+    instance.context = FakeContext()
     return instance
 
 
@@ -618,7 +679,7 @@ class BatchDownloadTests(unittest.IsolatedAsyncioTestCase):
             make_results(3),
         )
 
-        async def fake_add(torrent, _user_config):
+        async def fake_add(torrent, _user_config, _monitor=None):
             if torrent.index == 2:
                 raise plugin_module.UserFacingError("客户端拒绝任务")
 
@@ -1237,6 +1298,340 @@ class GayTorrentsSessionTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(plugin_module.UserFacingError, "账号或密码不正确"):
             await self.instance._login_gaytorrents(provider, {})
+
+
+class DownloadMonitorTests(unittest.IsolatedAsyncioTestCase):
+    COMPLETE_MESSAGE = "种子已下载完成，请登录群网盘-桌面botdownload文件夹查看"
+
+    def setUp(self):
+        self.instance = make_plugin({"monitor_interval_minutes": 5})
+        self.user_config = {
+            "download_client": "qbittorrent",
+            "qb_url": "http://127.0.0.1:8080/",
+            "qb_username": "admin",
+            "qb_password": "adminadmin",
+        }
+        self.event = FakeEvent("10001", session="QQ|GroupMessage|group1|10001")
+
+    def register_watch(self, title="种子 A", torrent_hash="ab12" * 10):
+        self.instance._register_download_watch(
+            self.instance._monitor_target(self.event, self.user_config),
+            self.user_config,
+            title,
+            torrent_hash,
+        )
+
+    def test_download_client_config_is_the_default_qbittorrent(self):
+        self.assertEqual(
+            self.instance._download_client_type({}),
+            "qbittorrent",
+        )
+
+    def test_torrent_btih_is_sha1_of_info_section(self):
+        info = b"d4:name4:test12:piece lengthi65536e6:pieces0:e"
+        content = b"d4:info" + info + b"e"
+        expected = hashlib.sha1(info).hexdigest()
+
+        self.assertEqual(self.instance._torrent_btih(content), expected)
+
+    def test_torrent_btih_skips_keys_before_info(self):
+        info = b"d4:name4:teste"
+        announce = b"http://tracker.example/announce"
+        content = (
+            b"d8:announce"
+            + str(len(announce)).encode()
+            + b":"
+            + announce
+            + b"13:creation datei1700000000e4:info"
+            + info
+            + b"e"
+        )
+        expected = hashlib.sha1(info).hexdigest()
+
+        self.assertEqual(self.instance._torrent_btih(content), expected)
+
+    def test_torrent_btih_rejects_invalid_data(self):
+        self.assertEqual(self.instance._torrent_btih(b"<html>nope</html>"), "")
+
+    def test_magnet_btih_supports_hex_and_base32(self):
+        digest = bytes(range(20))
+        hex_uri = f"magnet:?xt=urn:btih:{digest.hex()}&dn=test"
+        base32 = base64.b32encode(digest).decode().rstrip("=")
+        base32_uri = f"magnet:?xt=urn:btih:{base32}&dn=test"
+
+        self.assertEqual(self.instance._magnet_btih(hex_uri), digest.hex())
+        self.assertEqual(self.instance._magnet_btih(base32_uri), digest.hex())
+        self.assertEqual(self.instance._magnet_btih("magnet:?dn=test"), "")
+
+    def test_completed_detection_uses_qbittorrent_states(self):
+        for state in ("uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP"):
+            self.assertTrue(
+                self.instance._qbittorrent_entry_completed({"state": state}),
+                state,
+            )
+        self.assertTrue(
+            self.instance._qbittorrent_entry_completed(
+                {"state": "downloading", "progress": 1.0}
+            )
+        )
+        self.assertFalse(
+            self.instance._qbittorrent_entry_completed(
+                {"state": "downloading", "progress": 0.5}
+            )
+        )
+        self.assertFalse(
+            self.instance._qbittorrent_entry_completed({"state": "stalledDL"})
+        )
+
+    def test_monitor_target_needs_session_qbittorrent_and_push(self):
+        self.assertIsNotNone(
+            self.instance._monitor_target(self.event, self.user_config)
+        )
+        self.assertIsNone(
+            self.instance._monitor_target(FakeEvent("10001"), self.user_config)
+        )
+        self.assertIsNone(
+            self.instance._monitor_target(
+                self.event,
+                {
+                    "download_client": "utorrent",
+                    "ut_url": "http://127.0.0.1:8081/",
+                    "ut_username": "admin",
+                    "ut_password": "pw",
+                },
+            )
+        )
+        self.assertIsNone(
+            self.instance._monitor_target(
+                self.event, {**self.user_config, "monitor_enabled": False}
+            )
+        )
+
+    def test_monitor_note_explains_monitoring(self):
+        monitor = self.instance._monitor_target(self.event, self.user_config)
+
+        note = self.instance._monitor_note(self.user_config, monitor, 2)
+
+        self.assertIn("已加入下载状态监控", note)
+        self.assertIn("每 5 分钟汇报一次", note)
+        self.assertEqual(self.instance._monitor_note(self.user_config, monitor, 0), "")
+
+    def test_monitor_note_mentions_utorrent_limitation(self):
+        user_config = {
+            "download_client": "utorrent",
+            "ut_url": "http://127.0.0.1:8081/",
+        }
+
+        note = self.instance._monitor_note(user_config, None, 1)
+
+        self.assertIn("uTorrent 暂不支持下载状态监控", note)
+
+    def test_watch_is_registered_once_per_hash_and_user(self):
+        self.register_watch()
+        self.register_watch(title="种子 A 改名")
+
+        self.assertEqual(len(self.instance._download_watches), 1)
+        watch = next(iter(self.instance._download_watches.values()))
+        self.assertEqual(watch.title, "种子 A 改名")
+        self.assertEqual(watch.qb_url, "http://127.0.0.1:8080")
+        self.assertEqual(watch.session, self.event.unified_msg_origin)
+
+    async def test_watch_registry_drops_oldest_over_limit(self):
+        monitor = self.instance._monitor_target(self.event, self.user_config)
+        for index in range(plugin_module.MONITOR_MAX_WATCHES + 3):
+            self.instance._register_download_watch(
+                monitor,
+                self.user_config,
+                f"种子 {index}",
+                f"{index:040x}",
+            )
+
+        self.assertEqual(
+            len(self.instance._download_watches), plugin_module.MONITOR_MAX_WATCHES
+        )
+        self.assertNotIn("种子 0", {watch.title for watch in self._watches()})
+
+    def _watches(self):
+        return sorted(
+            self.instance._download_watches.values(),
+            key=lambda watch: watch.registered_at,
+        )
+
+    def install_task_map(self, entries):
+        async def fake_task_map(_watches):
+            return entries
+
+        self.instance._fetch_qbittorrent_task_map = fake_task_map
+
+    async def test_completion_sends_fixed_message_with_at_once(self):
+        self.register_watch()
+        self.install_task_map(
+            {
+                "ab12" * 10: {
+                    "state": "stalledUP",
+                    "name": "种子 A",
+                    "progress": 1,
+                    "size": 1024,
+                    "total_done": 1024,
+                }
+            }
+        )
+
+        await self.instance._monitor_once()
+        await self.instance._monitor_once()
+
+        self.assertEqual(self.instance._download_watches, {})
+        sent = self.instance.context.sent
+        self.assertEqual(len(sent), 1)
+        session, chain = sent[0]
+        self.assertEqual(session, self.event.unified_msg_origin)
+        self.assertTrue(chain_text(chain).endswith(self.COMPLETE_MESSAGE))
+        self.assertEqual(chain.chain[0].qq, 10001)
+
+    async def test_progress_report_is_sent_while_downloading(self):
+        self.register_watch()
+        self.install_task_map(
+            {
+                "ab12" * 10: {
+                    "state": "downloading",
+                    "name": "种子 A",
+                    "progress": 0.5,
+                    "size": 2048,
+                    "total_done": 1024,
+                    "upspeed": 512,
+                    "dlspeed": 1024,
+                    "eta": 90,
+                }
+            }
+        )
+
+        await self.instance._monitor_once()
+
+        self.assertEqual(len(self.instance._download_watches), 1)
+        text = chain_text(self.instance.context.sent[0][1])
+        self.assertIn("下载进度｜种子 A", text)
+        self.assertIn("状态：下载中", text)
+        self.assertIn("50.0%", text)
+        self.assertIn("KiB", text)
+
+    async def test_progress_report_can_be_disabled(self):
+        self.instance.config["monitor_report_progress"] = False
+        self.register_watch()
+        self.install_task_map(
+            {"ab12" * 10: {"state": "downloading", "name": "种子 A", "progress": 0.2}}
+        )
+
+        await self.instance._monitor_once()
+
+        self.assertEqual(self.instance.context.sent, [])
+        self.assertEqual(len(self.instance._download_watches), 1)
+
+    async def test_missing_task_stops_monitoring(self):
+        self.register_watch()
+        self.install_task_map({})
+
+        await self.instance._monitor_once()
+
+        self.assertEqual(self.instance._download_watches, {})
+        self.assertIn("已找不到", chain_text(self.instance.context.sent[0][1]))
+
+    async def test_stale_task_stops_monitoring(self):
+        self.instance.config["monitor_max_hours"] = 12
+        self.register_watch()
+        watch = next(iter(self.instance._download_watches.values()))
+        watch.registered_at = time.time() - 13 * 3600
+        self.install_task_map(
+            {"ab12" * 10: {"state": "stalledDL", "name": "种子 A", "progress": 0.1}}
+        )
+
+        await self.instance._monitor_once()
+
+        self.assertEqual(self.instance._download_watches, {})
+        self.assertIn("超过 12 小时", chain_text(self.instance.context.sent[0][1]))
+
+    async def test_monitor_view_and_stop_commands(self):
+        self.register_watch(title="种子甲", torrent_hash="c" * 40)
+        self.register_watch(title="种子乙", torrent_hash="d" * 40)
+
+        view = await anext(self.instance.show_monitor_status(self.event))
+        self.assertIn("正在监控 2 个下载任务", view)
+        self.assertIn("种子甲", view)
+
+        stopped = await anext(self.instance.stop_monitor(self.event, "1"))
+        self.assertIn("已停止监控 1 个任务", stopped)
+        self.assertEqual(len(self.instance._download_watches), 1)
+
+        everything = await anext(self.instance.stop_monitor(self.event, "全部"))
+        self.assertIn("已停止监控 1 个任务", everything)
+        self.assertEqual(self.instance._download_watches, {})
+
+    async def test_monitor_help_lists_commands(self):
+        help_text = await anext(self.instance.monitor_help(self.event))
+
+        self.assertIn("/种子监控 查看", help_text)
+        self.assertIn("/种子监控 停止", help_text)
+
+    async def test_resolve_prefers_expected_hash_when_present(self):
+        client = self.make_qb_client(
+            [
+                {"hash": "OLD", "name": "旧", "added_on": 1},
+                {"hash": "NEW1", "added_on": 2},
+            ]
+        )
+
+        digest = await self.instance._resolve_qbittorrent_hash(
+            client, {"old"}, "new1", "种子 A"
+        )
+
+        self.assertEqual(digest, "new1")
+
+    async def test_resolve_picks_task_added_after_snapshot(self):
+        client = self.make_qb_client(
+            [
+                {"hash": "old", "name": "旧", "added_on": 1},
+                {"hash": "fresh", "name": "种子 A", "added_on": 2},
+            ]
+        )
+
+        digest = await self.instance._resolve_qbittorrent_hash(
+            client, {"old"}, "", "种子 A"
+        )
+
+        self.assertEqual(digest, "fresh")
+
+    async def test_resolve_matches_title_and_added_on(self):
+        client = self.make_qb_client(
+            [
+                {"hash": "a" * 40, "name": "别的种子", "added_on": 99},
+                {"hash": "b" * 40, "name": "Seed A 1080p", "added_on": 3},
+                {"hash": "c" * 40, "name": "Seed A 1080p x265", "added_on": 5},
+            ]
+        )
+
+        digest = await self.instance._resolve_qbittorrent_hash(
+            client, set(), "", "Seed A 1080p"
+        )
+
+        self.assertEqual(digest, "c" * 40)
+
+    async def test_resolve_falls_back_to_expected_hash_on_error(self):
+        class BrokenClient:
+            async def get(self, *_args, **_kwargs):
+                raise RuntimeError("connection refused")
+
+        digest = await self.instance._resolve_qbittorrent_hash(
+            BrokenClient(), set(), "d" * 40, "种子 A"
+        )
+
+        self.assertEqual(digest, "d" * 40)
+
+    @staticmethod
+    def make_qb_client(tasks):
+        class FakeClient:
+            async def get(self, _url, params=None, **_kwargs):
+                return plugin_module.httpx.Response(200, json=tasks)
+
+        return FakeClient()
 
 
 if __name__ == "__main__":

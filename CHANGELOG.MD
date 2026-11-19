@@ -2,6 +2,19 @@
 
 所有重要更改都将记录在此文件中。
 
+## [1.9.0] - 2026-11-19
+
+### 下载状态监控
+
+- 添加到 qBittorrent 的种子会自动登记监控，默认每 5 分钟向添加者所在的会话汇报一次进度（状态、百分比、已下载量、速度、预计剩余）。
+- 下载完成后会在原会话 @ 添加者，提示词固定为「种子已下载完成，请登录群网盘-桌面botdownload文件夹查看」。
+- 新增 `/种子监控 查看`、`/种子监控 停止 序号|全部`、`/种子监控 帮助`；停止监控只关闭汇报，不会取消下载任务。
+- 任务识别优先使用种子文件的 info hash（bencode `info` 段的 SHA1）和磁链里的 `xt=urn:btih:`，拿不到时按添加前后的任务列表差集与 `added_on` 推断。
+- 新增配置项 `monitor_enabled`、`monitor_interval_minutes`、`monitor_max_hours`、`monitor_report_progress`、`monitor_complete_message`；用户可用 `/种子配置 设置 监控下载 关闭` 单独关闭自己的监控。
+- 任务从 qBittorrent 中消失、超过 `monitor_max_hours` 小时仍未完成，或已汇报 60 次时会自动停止监控并说明原因。uTorrent 与缺少主动推送接口的旧版 AstrBot 会自动跳过监控。
+- 监控记录与 qBittorrent 凭据只保存在内存中，插件或 AstrBot 重启后需要重新添加任务才会继续监控。
+- 补充下载状态监控单元测试（info hash 计算、磁链哈希、完成判定、汇报文案、完成提示词与 @、数量上限与命令）。
+
 ## [1.8.0] - 2026-11-18
 
 ### Gay-Torrents 搜索

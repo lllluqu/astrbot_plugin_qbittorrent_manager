@@ -1,11 +1,12 @@
 name: astrbot_plugin_qbittorrent_manager
-desc: 按 QQ 用户独立配置 PT 站与下载客户端，默认搜索 Gay-Torrents，支持搜索种子和直接添加下载任务。
+desc: 按 QQ 用户独立配置 PT 站与下载客户端，默认搜索 Gay-Torrents，支持搜索种子、添加下载任务并监控下载进度。
 help: |
   /种子 关键词 - 搜索种子
   /种子 --sort=做种 --order=降序 -- 关键词 - 排序搜索
   /种子下载 序号... - 批量添加到个人下载客户端
+  /种子监控 查看 - 查看下载进度监控，下载完成会通知你
   /种子配置 帮助 - 配置个人 PT 与下载客户端
   /种子帮助 - 查看帮助
-version: v1.8.0
+version: v1.9.0
 author: Codex，JustMonika
 repo: https://github.com/lllluqu/astrbot_plugin_qbittorrent_manager

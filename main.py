@@ -1,9 +1,11 @@
 import asyncio
+import base64
+import hashlib
 import html
 import mimetypes
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import (
@@ -28,6 +30,17 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime for friendly errors
     BeautifulSoup = None
 
+try:
+    from astrbot.api.message_components import At, Plain
+except ImportError:  # pragma: no cover - 旧版 AstrBot 没有该导出
+    At = None
+    Plain = None
+
+try:
+    from astrbot.core.message.message_event_result import MessageChain
+except ImportError:  # pragma: no cover - 旧版 AstrBot 没有该导出
+    MessageChain = None
+
 
 def _llm_tool(name: str):
     """Register an AstrBot LLM tool while keeping unit-test stubs compatible."""
@@ -47,7 +60,7 @@ MAX_RENDER_HEIGHT = 5000
 RENDER_BASE_HEIGHT = 214
 RENDER_ITEM_HEIGHT = 108
 RENDER_STATUS_HEIGHT = 38
-PLUGIN_VERSION = "1.8.0"
+PLUGIN_VERSION = "1.9.0"
 
 SORT_FIELD_ALIASES = {
     "time": "time",
@@ -176,6 +189,46 @@ BUILTIN_PROVIDER_SEARCH_PATHS = {
 }
 
 
+MONITOR_DEFAULT_INTERVAL_MINUTES = 5
+MONITOR_DEFAULT_MAX_HOURS = 12
+MONITOR_MAX_WATCHES = 50
+MONITOR_MAX_REPORTS = 60
+MONITOR_TITLE_LIMIT = 60
+MONITOR_DEFAULT_COMPLETE_MESSAGE = (
+    "种子已下载完成，请登录群网盘-桌面botdownload文件夹查看"
+)
+QB_COMPLETE_STATES = {
+    "uploading",
+    "stalledUP",
+    "queuedUP",
+    "forcedUP",
+    "pausedUP",
+    "stoppedUP",
+}
+QB_STATE_LABELS = {
+    "error": "报错",
+    "missingFiles": "文件缺失",
+    "uploading": "做种中",
+    "stalledUP": "做种中",
+    "queuedUP": "排队做种",
+    "forcedUP": "强制做种",
+    "pausedUP": "下载完成（已暂停）",
+    "stoppedUP": "下载完成（已停止）",
+    "checkingUP": "校验中",
+    "checkingDL": "校验中",
+    "downloading": "下载中",
+    "forcedDL": "强制下载",
+    "forcedMetaDL": "获取元数据",
+    "metaDL": "获取元数据",
+    "stalledDL": "等待下载",
+    "queuedDL": "排队中",
+    "pausedDL": "已暂停",
+    "stoppedDL": "已停止",
+    "allocating": "分配空间",
+    "unknown": "未知状态",
+}
+
+
 @dataclass(frozen=True)
 class ConfigField:
     label: str
@@ -210,6 +263,7 @@ USER_CONFIG_FIELDS = {
     "cache_ttl_seconds": ConfigField("搜索缓存时间（秒）", "int", 60, 3600),
     "render_width": ConfigField("结果卡片宽度", "int", 640, 1400),
     "request_timeout": ConfigField("请求超时（秒）", "float", 5, 120),
+    "monitor_enabled": ConfigField("下载状态监控", "bool"),
 }
 
 BUILTIN_USER_CONFIG = {
@@ -235,6 +289,7 @@ BUILTIN_USER_CONFIG = {
     "direct_torrent_max_size_mb": 50,
     "max_results": 10,
     "cache_ttl_seconds": 600,
+    "monitor_enabled": True,
     "render_width": 900,
     "request_timeout": 20.0,
 }
@@ -272,6 +327,9 @@ CONFIG_KEY_ALIASES = {
     "缓存时间": "cache_ttl_seconds",
     "卡片宽度": "render_width",
     "超时": "request_timeout",
+    "监控": "monitor_enabled",
+    "监控下载": "monitor_enabled",
+    "下载监控": "monitor_enabled",
 }
 
 
@@ -312,6 +370,41 @@ class DirectDownload:
     title: str
 
 
+@dataclass(frozen=True)
+class MonitorTarget:
+    """发起下载的会话信息，用于下载完成后主动回报。"""
+
+    session: str
+    user_id: str
+    sender_id: str
+    group: bool
+
+
+@dataclass
+class DownloadWatch:
+    """已加入下载客户端、需要持续回报状态的任务。"""
+
+    session: str
+    user_id: str
+    sender_id: str
+    group: bool
+    title: str
+    torrent_hash: str
+    qb_url: str
+    qb_username: str
+    qb_password: str
+    registered_at: float = field(default_factory=time.time)
+    report_count: int = 0
+
+    @property
+    def client_key(self) -> str:
+        return f"{self.qb_url}|{self.torrent_hash}"
+
+    @property
+    def watch_key(self) -> str:
+        return f"{self.client_key}|{self.user_id}"
+
+
 @register(
     "astrbot_plugin_qbittorrent_manager",
     "Codex",
@@ -324,6 +417,8 @@ class QBittorrentManagerPlugin(Star):
         self.config = config or {}
         self._search_cache: dict[str, tuple[float, int, list[TorrentResult]]] = {}
         self._gt_sessions: dict[str, tuple[float, str]] = {}
+        self._download_watches: dict[str, DownloadWatch] = {}
+        self._monitor_task: asyncio.Task | None = None
         self._config_lock = asyncio.Lock()
 
     @filter.command("种子")
@@ -408,9 +503,10 @@ class QBittorrentManagerPlugin(Star):
 
         succeeded: list[TorrentResult] = []
         failed: list[tuple[TorrentResult, str]] = []
+        monitor = self._monitor_target(event, user_config)
         for torrent in torrents:
             try:
-                await self._add_to_download_client(torrent, user_config)
+                await self._add_to_download_client(torrent, user_config, monitor)
                 succeeded.append(torrent)
             except UserFacingError as error:
                 failed.append((torrent, str(error)))
@@ -419,7 +515,12 @@ class QBittorrentManagerPlugin(Star):
                 failed.append((torrent, f"添加下载失败：{error}"))
 
         yield event.plain_result(
-            self._format_batch_download_result(client_name, succeeded, failed)
+            self._format_batch_download_result(
+                client_name,
+                succeeded,
+                failed,
+                self._monitor_note(user_config, monitor, len(succeeded)),
+            )
         )
 
     @filter.command("直接下载")
@@ -445,8 +546,9 @@ class QBittorrentManagerPlugin(Star):
         try:
             user_config = self._user_config(event)
             client_name = self._download_client_name(user_config)
+            monitor = self._monitor_target(event, user_config)
             direct_download = DirectDownload(uri=uri, title=self._direct_title(uri))
-            await self._add_direct_download(direct_download, user_config)
+            await self._add_direct_download(direct_download, user_config, monitor)
         except UserFacingError as error:
             yield event.plain_result(str(error))
             return
@@ -455,7 +557,11 @@ class QBittorrentManagerPlugin(Star):
             yield event.plain_result(f"添加下载失败：{error}")
             return
 
-        yield event.plain_result(f"已添加到 {client_name}：{direct_download.title}")
+        yield event.plain_result(
+            "已添加到 "
+            f"{client_name}：{direct_download.title}"
+            f"{self._monitor_note(user_config, monitor, 1)}"
+        )
 
     @filter.command("磁链下载")
     async def magnet_download(self, event: AstrMessageEvent, uri: str = ""):
@@ -475,6 +581,91 @@ class QBittorrentManagerPlugin(Star):
             yield event.plain_result(str(error))
             return
         yield event.plain_result(self._help_text())
+
+    @filter.command_group("种子监控")
+    def torrent_monitor(self):
+        pass
+
+    @torrent_monitor.command("查看")
+    async def show_monitor_status(self, event: AstrMessageEvent):
+        try:
+            self._ensure_user_access(event)
+        except UserFacingError as error:
+            yield event.plain_result(str(error))
+            return
+
+        watches = self._user_watches(event)
+        if not watches:
+            yield event.plain_result(
+                "当前没有正在监控的下载任务。"
+                "用 /种子下载 或 /直接下载 添加到 qBittorrent 后会自动开始监控。"
+            )
+            return
+
+        interval = self._monitor_interval_minutes()
+        max_hours = self._monitor_max_hours()
+        lines = [
+            (
+                f"正在监控 {len(watches)} 个下载任务，"
+                f"每 {interval} 分钟汇报一次，完成后会通知你。"
+            ),
+            f"超过 {max_hours} 小时未完成的任务会自动停止监控。",
+        ]
+        for index, watch in enumerate(watches, start=1):
+            minutes = max(0, int((time.time() - watch.registered_at) // 60))
+            lines.append(
+                f"{index}. {self._short_title(watch.title)}｜已监控 {minutes} 分钟"
+            )
+        lines.append("停止汇报：/种子监控 停止 序号（或 全部），不会取消下载任务。")
+        yield event.plain_result("\n".join(lines))
+
+    @torrent_monitor.command("停止")
+    async def stop_monitor(self, event: AstrMessageEvent, selection: GreedyStr):
+        try:
+            self._ensure_user_access(event)
+        except UserFacingError as error:
+            yield event.plain_result(str(error))
+            return
+
+        selection = str(selection).strip()
+        if not selection:
+            yield event.plain_result(
+                "请发送 /种子监控 停止 序号，或 /种子监控 停止 全部。"
+            )
+            return
+
+        watches = self._user_watches(event)
+        if not watches:
+            yield event.plain_result("当前没有正在监控的下载任务。")
+            return
+
+        if selection in {"全部", "all"}:
+            removed = [watch.title for watch in watches]
+            for watch in watches:
+                self._download_watches.pop(watch.watch_key, None)
+        else:
+            try:
+                picked = self._pick_watches(selection, watches)
+            except UserFacingError as error:
+                yield event.plain_result(str(error))
+                return
+            removed = [watch.title for watch in picked]
+            for watch in picked:
+                self._download_watches.pop(watch.watch_key, None)
+
+        titles = "、".join(self._short_title(title) for title in removed)
+        yield event.plain_result(
+            f"已停止监控 {len(removed)} 个任务（不会取消下载任务）：{titles}"
+        )
+
+    @torrent_monitor.command("帮助")
+    async def monitor_help(self, event: AstrMessageEvent):
+        try:
+            self._ensure_user_access(event)
+        except UserFacingError as error:
+            yield event.plain_result(str(error))
+            return
+        yield event.plain_result(self._monitor_help_text())
 
     @_llm_tool("search_torrents")
     async def llm_search_torrents(
@@ -513,16 +704,22 @@ class QBittorrentManagerPlugin(Star):
         client_name = self._download_client_name(user_config)
         succeeded: list[TorrentResult] = []
         failed: list[tuple[TorrentResult, str]] = []
+        monitor = self._monitor_target(event, user_config)
         for torrent in torrents:
             try:
-                await self._add_to_download_client(torrent, user_config)
+                await self._add_to_download_client(torrent, user_config, monitor)
                 succeeded.append(torrent)
             except UserFacingError as error:
                 failed.append((torrent, str(error)))
             except Exception as error:  # noqa: BLE001
                 logger.exception("LLM 添加下载任务失败：%s", torrent.title)
                 failed.append((torrent, f"添加下载失败：{error}"))
-        return self._format_batch_download_result(client_name, succeeded, failed)
+        return self._format_batch_download_result(
+            client_name,
+            succeeded,
+            failed,
+            self._monitor_note(user_config, monitor, len(succeeded)),
+        )
 
     @_llm_tool("direct_download")
     async def llm_direct_download(self, event: AstrMessageEvent, uri: str) -> str:
@@ -532,9 +729,13 @@ class QBittorrentManagerPlugin(Star):
         if not self._is_supported_direct_uri(uri):
             raise UserFacingError("只支持 magnet、http 或 https 链接。")
         user_config = self._user_config(event)
+        monitor = self._monitor_target(event, user_config)
         direct_download = DirectDownload(uri=uri, title=self._direct_title(uri))
-        await self._add_direct_download(direct_download, user_config)
-        return f"已添加到 {self._download_client_name(user_config)}：{direct_download.title}"
+        await self._add_direct_download(direct_download, user_config, monitor)
+        return (
+            f"已添加到 {self._download_client_name(user_config)}：{direct_download.title}"
+            f"{self._monitor_note(user_config, monitor, 1)}"
+        )
 
     @_llm_tool("show_torrent_config")
     async def llm_show_torrent_config(self, event: AstrMessageEvent) -> str:
@@ -1259,21 +1460,33 @@ class QBittorrentManagerPlugin(Star):
         )
 
     async def _add_to_download_client(
-        self, torrent: TorrentResult, user_config: dict[str, Any]
-    ):
+        self,
+        torrent: TorrentResult,
+        user_config: dict[str, Any],
+        monitor: MonitorTarget | None = None,
+    ) -> str:
         torrent_file = await self._download_torrent_file(torrent, user_config)
         client_type = self._download_client_type(user_config)
         if client_type == "utorrent":
             await self._add_to_utorrent(torrent_file, user_config)
-            return
-        await self._add_to_qbittorrent(torrent_file, user_config)
+            return ""
+        torrent_hash = await self._add_to_qbittorrent(torrent_file, user_config)
+        self._register_download_watch(monitor, user_config, torrent.title, torrent_hash)
+        return torrent_hash
 
     async def _add_direct_download(
-        self, direct_download: DirectDownload, user_config: dict[str, Any]
-    ):
+        self,
+        direct_download: DirectDownload,
+        user_config: dict[str, Any],
+        monitor: MonitorTarget | None = None,
+    ) -> str:
         if direct_download.uri.lower().startswith("magnet:"):
-            await self._add_uri_to_download_client(direct_download.uri, user_config)
-            return
+            return await self._add_uri_to_download_client(
+                direct_download.uri,
+                user_config,
+                monitor,
+                direct_download.title,
+            )
 
         torrent_file = await self._download_torrent_from_url(
             direct_download.uri, user_config
@@ -1281,15 +1494,29 @@ class QBittorrentManagerPlugin(Star):
         client_type = self._download_client_type(user_config)
         if client_type == "utorrent":
             await self._add_to_utorrent(torrent_file, user_config)
-            return
-        await self._add_to_qbittorrent(torrent_file, user_config)
+            return ""
+        torrent_hash = await self._add_to_qbittorrent(torrent_file, user_config)
+        self._register_download_watch(
+            monitor, user_config, direct_download.title, torrent_hash
+        )
+        return torrent_hash
 
-    async def _add_uri_to_download_client(self, uri: str, user_config: dict[str, Any]):
+    async def _add_uri_to_download_client(
+        self,
+        uri: str,
+        user_config: dict[str, Any],
+        monitor: MonitorTarget | None = None,
+        title: str = "",
+    ) -> str:
         client_type = self._download_client_type(user_config)
         if client_type == "utorrent":
             await self._add_uri_to_utorrent(uri, user_config)
-            return
-        await self._add_uri_to_qbittorrent(uri, user_config)
+            return ""
+        torrent_hash = await self._add_uri_to_qbittorrent(uri, user_config)
+        self._register_download_watch(
+            monitor, user_config, title or self._direct_title(uri), torrent_hash
+        )
+        return torrent_hash
 
     async def _download_torrent_file(
         self, torrent: TorrentResult, user_config: dict[str, Any]
@@ -1425,7 +1652,7 @@ class QBittorrentManagerPlugin(Star):
 
     async def _add_to_qbittorrent(
         self, torrent_file: TorrentFile, user_config: dict[str, Any]
-    ):
+    ) -> str:
         qb_config = self._qbittorrent_config(user_config)
         save_path = (user_config.get("qb_save_path") or "").strip()
         category = (user_config.get("qb_category") or "").strip()
@@ -1438,6 +1665,7 @@ class QBittorrentManagerPlugin(Star):
             ),
         ) as qb_client:
             await self._login_qbittorrent(qb_client, qb_config)
+            known = await self._qbittorrent_hashes(qb_client)
 
             data: dict[str, Any] = {"paused": "true" if paused else "false"}
             if save_path:
@@ -1458,8 +1686,16 @@ class QBittorrentManagerPlugin(Star):
             self._check_qbittorrent_add_response(
                 add_response, "qBittorrent 添加任务失败"
             )
+            return await self._resolve_qbittorrent_hash(
+                qb_client,
+                known,
+                self._torrent_btih(torrent_file.content),
+                torrent_file.filename,
+            )
 
-    async def _add_uri_to_qbittorrent(self, uri: str, user_config: dict[str, Any]):
+    async def _add_uri_to_qbittorrent(
+        self, uri: str, user_config: dict[str, Any]
+    ) -> str:
         qb_config = self._qbittorrent_config(user_config)
         save_path = (user_config.get("qb_save_path") or "").strip()
         category = (user_config.get("qb_category") or "").strip()
@@ -1472,6 +1708,7 @@ class QBittorrentManagerPlugin(Star):
             ),
         ) as qb_client:
             await self._login_qbittorrent(qb_client, qb_config)
+            known = await self._qbittorrent_hashes(qb_client)
 
             data: dict[str, Any] = {
                 "urls": uri,
@@ -1486,6 +1723,518 @@ class QBittorrentManagerPlugin(Star):
             self._check_qbittorrent_add_response(
                 add_response, "qBittorrent 添加链接失败"
             )
+            magnet_hash = self._magnet_btih(uri)
+            return await self._resolve_qbittorrent_hash(
+                qb_client, known, magnet_hash, self._direct_title(uri)
+            )
+
+    async def _qbittorrent_hashes(self, qb_client: httpx.AsyncClient) -> set[str]:
+        """添加任务前的任务快照，用于识别新加的任务；列表接口不可用时返回空集合。"""
+        try:
+            tasks = await self._qbittorrent_tasks(qb_client)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("读取 qBittorrent 任务列表失败：%s", error)
+            return set()
+        return {
+            str(task.get("hash") or "").strip().lower()
+            for task in tasks
+            if task.get("hash")
+        }
+
+    async def _resolve_qbittorrent_hash(
+        self,
+        qb_client: httpx.AsyncClient,
+        known: set[str],
+        expected_hash: str,
+        expected_name: str,
+    ) -> str:
+        """优先用种子自身的 info hash，其次用添加前后的任务差集，拿不到返回空串。"""
+        try:
+            tasks = await self._qbittorrent_tasks(qb_client)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("查询 qBittorrent 新任务失败：%s", error)
+            return expected_hash
+        hashes = [str(task.get("hash") or "").strip().lower() for task in tasks]
+        if expected_hash and expected_hash in hashes:
+            return expected_hash
+        fresh = [
+            task
+            for task, digest in zip(tasks, hashes)
+            if digest and digest not in known
+        ]
+        if not fresh:
+            return expected_hash
+        if len(fresh) > 1:
+            target = self._normalize_title(expected_name)
+            matched = [
+                task
+                for task in fresh
+                if target
+                and target in self._normalize_title(str(task.get("name") or ""))
+            ]
+            fresh = matched or fresh
+        fresh.sort(key=lambda task: self._int_value(task.get("added_on")), reverse=True)
+        return str(fresh[0].get("hash") or "").strip().lower()
+
+    @staticmethod
+    async def _qbittorrent_tasks(
+        qb_client: httpx.AsyncClient, hashes: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        params = {"filter": "all"} if hashes is None else {"hashes": ",".join(hashes)}
+        response = await qb_client.get("/api/v2/torrents/info", params=params)
+        QBittorrentManagerPlugin._raise_for_response(
+            response, "查询 qBittorrent 任务列表失败"
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    @staticmethod
+    def _bdecode_skip(data: bytes, index: int) -> int:
+        """跳过（不解析）一个 bencode 值，返回它的结束位置。"""
+        marker = data[index : index + 1]
+        if marker == b"i":
+            return data.index(b"e", index) + 1
+        if marker in (b"d", b"l"):
+            cursor = index + 1
+            while data[cursor : cursor + 1] not in (b"e", b""):
+                cursor = QBittorrentManagerPlugin._bdecode_skip(data, cursor)
+                if marker == b"d":
+                    cursor = QBittorrentManagerPlugin._bdecode_skip(data, cursor)
+            return cursor + 1
+        if marker.isdigit():
+            colon = data.index(b":", index)
+            length = int(data[index:colon])
+            return colon + 1 + max(length, 0)
+        raise ValueError("不是有效的 bencode 数据")
+
+    @staticmethod
+    def _bdecode_key(data: bytes, index: int) -> tuple[bytes, int]:
+        colon = data.index(b":", index)
+        length = int(data[index:colon])
+        start = colon + 1
+        return data[start : start + max(length, 0)], start + max(length, 0)
+
+    @classmethod
+    def _torrent_btih(cls, content: bytes) -> str:
+        """计算 .torrent 的 v1 info hash，也就是 qBittorrent 里的任务 hash。"""
+        if not content.startswith(b"d"):
+            return ""
+        try:
+            cursor = 1
+            while content[cursor : cursor + 1] not in (b"e", b""):
+                key, cursor = cls._bdecode_key(content, cursor)
+                value_start = cursor
+                cursor = cls._bdecode_skip(content, cursor)
+                if key == b"info":
+                    return hashlib.sha1(content[value_start:cursor]).hexdigest()
+        except (ValueError, IndexError):
+            return ""
+        return ""
+
+    @staticmethod
+    def _magnet_btih(uri: str) -> str:
+        if not uri.lower().startswith("magnet:"):
+            return ""
+        query = urlparse(uri).query
+        for target in parse_qs(query).get("xt", []):
+            if not target.lower().startswith("urn:btih:"):
+                continue
+            digest = target.split(":", 2)[2].strip()
+            if re.fullmatch(r"[0-9a-fA-F]{40}", digest):
+                return digest.lower()
+            if re.fullmatch(r"[A-Za-z2-7]{32}", digest):
+                try:
+                    return base64.b32decode(digest.upper()).hex()
+                except ValueError:
+                    return ""
+        return ""
+
+    def _monitor_target(
+        self, event: AstrMessageEvent, user_config: dict[str, Any]
+    ) -> MonitorTarget | None:
+        """决定要不要为这次添加建立监控，不需要时返回 None。"""
+        if not bool(user_config.get("monitor_enabled", True)):
+            return None
+        if self._download_client_type(user_config) != "qbittorrent":
+            return None
+        if not self._monitor_push_available():
+            return None
+        session = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not session:
+            return None
+        user_id = self._user_id(event)
+        return MonitorTarget(
+            session=session,
+            user_id=user_id,
+            sender_id=str(
+                getattr(event, "get_sender_id", lambda: user_id)() or user_id
+            ),
+            group=self._event_is_group(event),
+        )
+
+    @staticmethod
+    def _event_is_group(event: AstrMessageEvent) -> bool:
+        checker = getattr(event, "is_private_chat", None)
+        if not callable(checker):
+            return False
+        try:
+            return not bool(checker())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _monitor_push_available(self) -> bool:
+        if MessageChain is None or Plain is None:
+            return False
+        return hasattr(getattr(self, "context", None), "send_message")
+
+    def _monitor_note(
+        self, user_config: dict[str, Any], monitor: Any, added: int
+    ) -> str:
+        if added <= 0:
+            return ""
+        if monitor is not None:
+            return (
+                f"已加入下载状态监控，每 {self._monitor_interval_minutes()} 分钟汇报一次，"
+                "下载完成后会通知你。"
+            )
+        if self._download_client_type(user_config) != "qbittorrent":
+            if not bool(user_config.get("monitor_enabled", True)):
+                return ""
+            return "提示：uTorrent 暂不支持下载状态监控。"
+        if not bool(user_config.get("monitor_enabled", True)):
+            return "提示：你已关闭下载状态监控。"
+        return "提示：当前 AstrBot 版本不支持主动推送，已跳过下载状态监控。"
+
+    def _register_download_watch(
+        self,
+        monitor: MonitorTarget | None,
+        user_config: dict[str, Any],
+        title: str,
+        torrent_hash: str,
+    ) -> None:
+        if monitor is None or not torrent_hash:
+            return
+        qb_config = self._qbittorrent_config(user_config)
+        watch = DownloadWatch(
+            session=monitor.session,
+            user_id=monitor.user_id,
+            sender_id=monitor.sender_id,
+            group=monitor.group,
+            title=title,
+            torrent_hash=torrent_hash,
+            qb_url=qb_config["url"],
+            qb_username=qb_config["username"],
+            qb_password=qb_config["password"],
+        )
+        self._download_watches[watch.watch_key] = watch
+        self._prune_watches()
+        self._ensure_monitor_task()
+
+    def _prune_watches(self) -> None:
+        extra = len(self._download_watches) - MONITOR_MAX_WATCHES
+        if extra <= 0:
+            return
+        oldest = sorted(
+            self._download_watches.values(), key=lambda watch: watch.registered_at
+        )[:extra]
+        for watch in oldest:
+            self._download_watches.pop(watch.watch_key, None)
+        logger.warning(
+            "下载状态监控数量已达上限 %d，停止监控最早的 %d 个任务。",
+            MONITOR_MAX_WATCHES,
+            extra,
+        )
+
+    def _user_watches(self, event: AstrMessageEvent) -> list[DownloadWatch]:
+        user_id = self._user_id(event)
+        session = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        watches = [
+            watch
+            for watch in self._download_watches.values()
+            if watch.user_id == user_id and (not session or watch.session == session)
+        ]
+        return sorted(watches, key=lambda watch: watch.registered_at)
+
+    @staticmethod
+    def _pick_watches(
+        selection: str, watches: list[DownloadWatch]
+    ) -> list[DownloadWatch]:
+        picked: list[DownloadWatch] = []
+        for token in re.split(r"[\s,，]+", selection.strip()):
+            if not token:
+                continue
+            if not token.isdigit():
+                raise UserFacingError("序号只能是数字，例如 /种子监控 停止 1 2。")
+            index = int(token)
+            if not 1 <= index <= len(watches):
+                raise UserFacingError(
+                    f"序号 {index} 超出范围，当前监控 {len(watches)} 个任务。"
+                )
+            watch = watches[index - 1]
+            if watch not in picked:
+                picked.append(watch)
+        if not picked:
+            raise UserFacingError("请选择要停止监控的序号。")
+        return picked
+
+    def _monitor_interval_minutes(self) -> int:
+        return self._int_config(
+            "monitor_interval_minutes",
+            MONITOR_DEFAULT_INTERVAL_MINUTES,
+            1,
+            120,
+        )
+
+    def _monitor_max_hours(self) -> int:
+        return self._int_config("monitor_max_hours", MONITOR_DEFAULT_MAX_HOURS, 1, 168)
+
+    def _monitor_complete_message(self) -> str:
+        message = str(self.config.get("monitor_complete_message") or "").strip()
+        return message or MONITOR_DEFAULT_COMPLETE_MESSAGE
+
+    def _ensure_monitor_task(self) -> None:
+        if self._monitor_task is not None and not self._monitor_task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("当前没有运行中的事件循环，未启动下载状态监控。")
+            return
+        self._monitor_task = asyncio.create_task(self._monitor_downloads())
+
+    async def _monitor_downloads(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self._monitor_interval_minutes() * 60)
+                await self._monitor_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("下载状态监控任务出错")
+
+    async def _monitor_once(self) -> None:
+        watches = list(self._download_watches.values())
+        if not watches:
+            return
+        report_progress = bool(self.config.get("monitor_report_progress", True))
+        max_age = self._monitor_max_hours() * 3600
+        groups: dict[str, list[DownloadWatch]] = {}
+        for watch in watches:
+            groups.setdefault(f"{watch.qb_url}|{watch.qb_username}", []).append(watch)
+        for group in groups.values():
+            entries = await self._fetch_qbittorrent_task_map(group)
+            if entries is None:
+                continue
+            for watch in group:
+                await self._report_download_watch(
+                    watch,
+                    entries.get(watch.torrent_hash),
+                    max_age,
+                    report_progress,
+                )
+
+    async def _fetch_qbittorrent_task_map(
+        self, watches: list[DownloadWatch]
+    ) -> dict[str, dict[str, Any]] | None:
+        first = watches[0]
+        qb_config = {
+            "url": first.qb_url,
+            "username": first.qb_username,
+            "password": first.qb_password,
+        }
+        hashes = [watch.torrent_hash for watch in watches]
+        try:
+            async with httpx.AsyncClient(
+                base_url=qb_config["url"],
+                timeout=self._float_config("request_timeout", 20.0, 5.0, 120.0),
+            ) as qb_client:
+                await self._login_qbittorrent(qb_client, qb_config)
+                tasks = await self._qbittorrent_tasks(qb_client, hashes)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "查询 qBittorrent 下载状态失败（%s）：%s", qb_config["url"], error
+            )
+            return None
+        return {
+            str(task.get("hash") or "").strip().lower(): task
+            for task in tasks
+            if task.get("hash")
+        }
+
+    async def _report_download_watch(
+        self,
+        watch: DownloadWatch,
+        entry: dict[str, Any] | None,
+        max_age: float,
+        report_progress: bool,
+    ) -> None:
+        title = self._short_title(watch.title)
+        if entry is None:
+            self._download_watches.pop(watch.watch_key, None)
+            await self._send_monitor_message(
+                watch, f"qBittorrent 中已找不到「{title}」，已停止汇报下载状态。"
+            )
+            return
+        if self._qbittorrent_entry_completed(entry):
+            self._download_watches.pop(watch.watch_key, None)
+            await self._send_monitor_message(
+                watch, self._monitor_complete_message(), mention=True
+            )
+            return
+        if time.time() - watch.registered_at > max_age:
+            self._download_watches.pop(watch.watch_key, None)
+            await self._send_monitor_message(
+                watch,
+                f"「{title}」下载超过 {self._monitor_max_hours()} 小时仍未完成，"
+                "已停止汇报下载状态。",
+            )
+            return
+        watch.report_count += 1
+        if watch.report_count > MONITOR_MAX_REPORTS:
+            self._download_watches.pop(watch.watch_key, None)
+            await self._send_monitor_message(
+                watch,
+                f"「{title}」已汇报 {MONITOR_MAX_REPORTS} 次仍未完成，已停止汇报。",
+            )
+            return
+        if not report_progress:
+            return
+        await self._send_monitor_message(
+            watch, self._format_progress_text(watch, entry)
+        )
+
+    @staticmethod
+    def _qbittorrent_entry_completed(entry: dict[str, Any]) -> bool:
+        state = str(entry.get("state") or "")
+        status = str(entry.get("status") or "")
+        if status == "uploaded" or state in QB_COMPLETE_STATES:
+            return True
+        if state.endswith("UP"):
+            return True
+        return QBittorrentManagerPlugin._float_value(entry.get("progress")) >= 1
+
+    def _format_progress_text(self, watch: DownloadWatch, entry: dict[str, Any]) -> str:
+        state = str(entry.get("state") or "")
+        state_label = QB_STATE_LABELS.get(state) or (state or "未知状态")
+        ratio = self._float_value(entry.get("progress"))
+        percent = ratio * 100 if 0 <= ratio <= 1 else ratio
+        size = self._int_value(entry.get("size"))
+        received = self._int_value(entry.get("received"))
+        if received < 0 and size > 0:
+            received = int(size * min(max(ratio, 0.0), 1.0))
+        name = str(entry.get("name") or "").strip() or watch.title
+        lines = [
+            f"下载进度｜{self._short_title(name)}",
+            f"状态：{state_label} ｜ 进度：{percent:.1f}%",
+        ]
+        if size > 0:
+            lines.append(
+                f"已下载：{self._format_bytes(received)} / {self._format_bytes(size)}"
+            )
+        if not state.endswith("UP"):
+            lines.append(
+                f"速度：↓{self._format_speed(entry.get('dlspeed'))} "
+                f"↑{self._format_speed(entry.get('upspeed'))}"
+            )
+            lines.append(f"预计剩余：{self._format_eta(entry.get('eta'))}")
+        lines.append("完成下载后会通知你，随时可用 /种子监控 查看。")
+        return "\n".join(lines)
+
+    async def _send_monitor_message(
+        self, watch: DownloadWatch, text: str, *, mention: bool = False
+    ) -> None:
+        chain = self._monitor_message(watch, text, mention)
+        if chain is None:
+            return
+        try:
+            await self.context.send_message(watch.session, chain)
+        except Exception:  # noqa: BLE001
+            logger.exception("推送下载状态失败：%s", watch.title)
+
+    @staticmethod
+    def _monitor_message(watch: DownloadWatch, text: str, mention: bool) -> Any:
+        if MessageChain is None or Plain is None:
+            return None
+        components: list[Any] = []
+        if mention and watch.group and At is not None and watch.sender_id.isdigit():
+            components.append(At(qq=int(watch.sender_id)))
+            components.append(Plain(" "))
+        components.append(Plain(text))
+        return MessageChain(chain=components)
+
+    @staticmethod
+    def _short_title(title: str) -> str:
+        clean = " ".join(str(title or "").split())
+        if len(clean) <= MONITOR_TITLE_LIMIT:
+            return clean
+        return f"{clean[: MONITOR_TITLE_LIMIT - 1]}…"
+
+    @staticmethod
+    def _normalize_title(title: str) -> str:
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]", "", str(title or "").lower())
+
+    @staticmethod
+    def _int_value(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return -1
+
+    @staticmethod
+    def _float_value(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return -1.0
+
+    @staticmethod
+    def _format_bytes(value: Any) -> str:
+        size = QBittorrentManagerPlugin._int_value(value)
+        if size < 0:
+            return "未知"
+        units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+        scaled = float(size)
+        for unit in units:
+            if scaled < 1024 or unit == units[-1]:
+                return f"{scaled:.0f} {unit}" if unit == "B" else f"{scaled:.2f} {unit}"
+            scaled /= 1024
+        return "未知"
+
+    @classmethod
+    def _format_speed(cls, value: Any) -> str:
+        speed = cls._int_value(value)
+        if speed <= 0:
+            return "0 B/s"
+        return f"{cls._format_bytes(speed)}/s"
+
+    @staticmethod
+    def _format_eta(value: Any) -> str:
+        seconds = QBittorrentManagerPlugin._int_value(value)
+        if seconds <= 0:
+            return "未知"
+        hours, remainder = divmod(seconds, 3600)
+        minutes, rest = divmod(remainder, 60)
+        if hours:
+            return f"{hours} 小时 {minutes} 分"
+        if minutes:
+            return f"{minutes} 分 {rest} 秒"
+        return f"{rest} 秒"
+
+    @staticmethod
+    def _monitor_help_text() -> str:
+        return (
+            "下载状态监控（只监控 qBittorrent 任务）：\n"
+            "/种子下载 或 /直接下载 添加任务后自动开始监控。\n"
+            "/种子监控 查看：查看当前正在监控的任务。\n"
+            "/种子监控 停止 序号：停止某个任务的汇报（不会取消下载）。\n"
+            "/种子监控 停止 全部：停止所有汇报。\n"
+            "下载完成会按固定提示词提醒添加者；监控记录只保存在内存，重启后需重新添加。"
+        )
 
     async def _add_to_utorrent(
         self, torrent_file: TorrentFile, user_config: dict[str, Any]
@@ -2092,9 +2841,9 @@ class QBittorrentManagerPlugin(Star):
             lines.append("全局配置：允许继承")
         else:
             lines.append("全局配置：仅管理员可用，当前仅使用个人或内置默认配置")
-        for key, field in USER_CONFIG_FIELDS.items():
+        for key, spec in USER_CONFIG_FIELDS.items():
             value = user_config.get(key)
-            if field.sensitive:
+            if spec.sensitive:
                 display = "已设置" if value else "未设置"
             elif isinstance(value, bool):
                 display = "是" if value else "否"
@@ -2108,7 +2857,7 @@ class QBittorrentManagerPlugin(Star):
                 source = "全局"
             else:
                 source = "内置"
-            lines.append(f"{field.label}：{display}（{source}）")
+            lines.append(f"{spec.label}：{display}（{source}）")
         lines.append("发送 /种子配置 帮助 查看设置方法。")
         return "\n".join(lines)
 
@@ -2143,6 +2892,7 @@ class QBittorrentManagerPlugin(Star):
         client_name: str,
         succeeded: list[TorrentResult],
         failed: list[tuple[TorrentResult, str]],
+        note: str = "",
     ) -> str:
         lines: list[str] = []
         if succeeded:
@@ -2156,6 +2906,9 @@ class QBittorrentManagerPlugin(Star):
                 f"{torrent.index}. {torrent.title}：{reason}"
                 for torrent, reason in failed
             )
+        if lines and note:
+            lines.append("")
+            lines.append(note)
         return "\n".join(lines) or "没有可添加的下载任务。"
 
     @staticmethod
@@ -2552,7 +3305,8 @@ class QBittorrentManagerPlugin(Star):
             "2. /种子 --sort=做种 --order=降序 -- 关键词 - 排序搜索\n"
             "3. /种子下载 序号... - 批量添加所选种子到下载客户端\n"
             "4. /直接下载 磁链或种子链接 - 直接添加下载任务\n"
-            "5. /种子配置 帮助 - 配置自己的 PT 与下载客户端\n"
+            "5. /种子监控 查看 - 查看下载进度监控（完成会提醒你）\n"
+            "6. /种子配置 帮助 - 配置自己的 PT 与下载客户端\n"
             "Gay-Torrents 需要登录：/种子配置 设置 pt账号 你的账号，"
             "再 /种子配置 设置 pt密码 你的密码。\n"
             "每位用户按 QQ 号使用独立配置。"
@@ -2609,6 +3363,9 @@ class QBittorrentManagerPlugin(Star):
         return min(max(value, minimum), maximum)
 
     async def terminate(self):
+        if self._monitor_task is not None and not self._monitor_task.done():
+            self._monitor_task.cancel()
+        self._download_watches.clear()
         await asyncio.sleep(0)
 
 

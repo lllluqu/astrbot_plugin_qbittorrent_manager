@@ -142,6 +142,36 @@
     "hint": "5-120",
     "default": 20
   },
+  "monitor_enabled": {
+    "description": "是否监控 qBittorrent 下载状态，并定时向添加者汇报。",
+    "type": "bool",
+    "hint": "只支持 qBittorrent WebAPI，uTorrent 不会被监控。",
+    "default": true
+  },
+  "monitor_interval_minutes": {
+    "description": "下载状态汇报间隔，单位分钟。",
+    "type": "int",
+    "hint": "1-120",
+    "default": 5
+  },
+  "monitor_max_hours": {
+    "description": "单个任务最长监控时长，单位小时，超时后停止汇报。",
+    "type": "int",
+    "hint": "1-168",
+    "default": 12
+  },
+  "monitor_report_progress": {
+    "description": "是否每个周期都汇报下载进度。",
+    "type": "bool",
+    "hint": "关闭后只在下载完成或任务消失时通知。",
+    "default": true
+  },
+  "monitor_complete_message": {
+    "description": "下载完成时发送的提示词。",
+    "type": "string",
+    "hint": "留空则使用默认提示词。",
+    "default": "种子已下载完成，请登录群网盘-桌面botdownload文件夹查看"
+  },
   "access_whitelist": {
     "description": "插件用户白名单",
     "type": "list",
@@ -336,6 +366,12 @@
             "type": "float",
             "hint": "5-120",
             "default": 20
+          },
+          "monitor_enabled": {
+            "description": "下载状态监控",
+            "type": "bool",
+            "hint": "关闭后不汇报下载进度，也不会收到完成提醒。",
+            "default": true
           }
         }
       }
