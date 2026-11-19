@@ -337,6 +337,9 @@ HTTP(S) 链接会先由插件下载并校验为 `.torrent` 文件，再上传到
 /下载 magnet:?xt=urn:btih:xxxx
 /下载 https://example.com/movie.mkv
 /下载 https://www.bilibili.com/video/BV1xx411c7mD
+/下载 aria2 https://example.com/movie.mkv
+/下载 qb https://example.com/movie.mkv
+/下载 ytdlp https://www.bilibili.com/video/BV1xx411c7mD
 ```
 
 插件按链接类型自动分发到对应下载工具：
@@ -350,6 +353,8 @@ HTTP(S) 链接会先由插件下载并校验为 `.torrent` 文件，再上传到
 - `aria2_rpc_url` 留空时，普通直链会自动退回 qBittorrent，并在回复里说明。
 - 未配置 `ytdlp_api_url` 时会直接提示需要配置 yt-dlp 服务，不会误投给 aria2。
 - 提交结果会写明识别依据，例如 `已提交给 aria2（识别为普通直链）：movie.mkv`。
+- 想跳过自动判断，可在链接前加后端名：`aria2`、`qb`（也支持 `qbt`/`qbittorrent`）、`ytdlp`（也支持 `yt-dlp`），例如 `/下载 qb https://example.com/movie.mkv` 会强制交给 qBittorrent，回复里的识别依据写「手动指定」。指定 aria2 或 yt-dlp 时若对应地址未配置，会直接提示需要配置。
+- `/下载 qb …` 仍然按你的 `download_client` 配置走，配了 uTorrent 就交给 uTorrent（该客户端不支持下载状态监控，会照旧提示）。
 
 #### aria2
 

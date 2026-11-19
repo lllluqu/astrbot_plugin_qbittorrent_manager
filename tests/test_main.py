@@ -2035,6 +2035,112 @@ class SmartDownloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("请发送 /下载 链接", str(result))
 
+    def test_split_download_backend_recognises_aliases(self):
+        cases = {
+            "aria2 https://example.com/a.mkv": ("aria2", "https://example.com/a.mkv"),
+            "qb https://example.com/a.mkv": (
+                "qbittorrent",
+                "https://example.com/a.mkv",
+            ),
+            "qbt https://example.com/a.mkv": (
+                "qbittorrent",
+                "https://example.com/a.mkv",
+            ),
+            "ytdlp https://youtu.be/abc": ("ytdlp", "https://youtu.be/abc"),
+            "yt-dlp https://youtu.be/abc": ("ytdlp", "https://youtu.be/abc"),
+            f"<{self.MAGNET}> 备注": ("", self.MAGNET),
+            "https://example.com/a.mkv": ("", "https://example.com/a.mkv"),
+            "aria2": ("aria2", ""),
+            "": ("", ""),
+        }
+
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.instance._split_download_backend(text), expected)
+
+    def test_forced_backend_reports_missing_configuration(self):
+        with self.assertRaises(plugin_module.UserFacingError) as ctx:
+            self.instance._forced_download_kind(
+                "aria2", dict(self.user_config, aria2_rpc_url="")
+            )
+        self.assertIn("aria2_rpc_url", str(ctx.exception))
+
+        with self.assertRaises(plugin_module.UserFacingError) as ctx:
+            self.instance._forced_download_kind(
+                "ytdlp", dict(self.user_config, ytdlp_api_url="")
+            )
+        self.assertIn("ytdlp_api_url", str(ctx.exception))
+
+        self.assertEqual(
+            self.instance._forced_download_kind("qb", self.user_config),
+            ("qbittorrent", "手动指定"),
+        )
+
+    async def test_download_command_forces_the_requested_backend(self):
+        calls = []
+
+        async def fake_aria2(uri, _user_config):
+            calls.append(("aria2", uri))
+            return "gid001"
+
+        async def fake_ytdlp(uri, _user_config):
+            calls.append(("ytdlp", uri))
+            return "T123"
+
+        async def fake_qb(uri, user_config, monitor=None, title=""):
+            calls.append(("qb", uri))
+            self.instance._register_download_watch(
+                monitor, user_config, title, "ab12" * 10
+            )
+            return "ab12" * 10
+
+        self.instance._user_config = lambda _event: self.user_config
+        self.instance._add_to_aria2 = fake_aria2
+        self.instance._add_to_ytdlp = fake_ytdlp
+        self.instance._add_uri_to_download_client = fake_qb
+
+        replies = []
+        for text in (
+            "aria2 https://www.youtube.com/watch?v=abc",
+            "qb https://cdn.example.com/movie.mkv",
+            "ytdlp https://cdn.example.com/movie.mkv",
+        ):
+            result = await anext(self.instance.smart_download(self.event, text))
+            replies.append(result)
+
+        self.assertEqual([kind for kind, _ in calls], ["aria2", "qb", "ytdlp"])
+        self.assertIn("已提交给 aria2（识别为手动指定）", str(replies[0]))
+        self.assertIn("已提交给 qBittorrent（识别为手动指定）", str(replies[1]))
+        self.assertIn("已提交给 yt-dlp（识别为手动指定）", str(replies[2]))
+        kinds = {watch.kind for watch in self.instance._download_watches.values()}
+        self.assertEqual(kinds, {"qbittorrent", "aria2", "ytdlp"})
+
+    async def test_download_command_asks_for_link_after_backend_alias(self):
+        result = await anext(self.instance.smart_download(self.event, "aria2"))
+
+        self.assertIn("请在 /下载 aria2 后面加上链接", str(result))
+
+    def test_monitor_kind_follows_the_configured_client_for_qb(self):
+        self.assertEqual(
+            self.instance._monitor_kind("qbittorrent", {"download_client": "utorrent"}),
+            "utorrent",
+        )
+        self.assertEqual(
+            self.instance._monitor_kind(None, {"download_client": "qbittorrent"}),
+            "qbittorrent",
+        )
+        self.assertEqual(self.instance._monitor_kind("aria2", {}), "aria2")
+
+    def test_qb_alias_with_utorrent_says_monitoring_is_unsupported(self):
+        note = self.instance._monitor_note(
+            {"download_client": "utorrent", "monitor_enabled": True},
+            None,
+            1,
+            "qbittorrent",
+        )
+
+        self.assertIn("uTorrent 暂不支持下载状态监控", note)
+
 
 if __name__ == "__main__":
     unittest.main()

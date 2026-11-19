@@ -60,7 +60,7 @@ MAX_RENDER_HEIGHT = 5000
 RENDER_BASE_HEIGHT = 214
 RENDER_ITEM_HEIGHT = 108
 RENDER_STATUS_HEIGHT = 38
-PLUGIN_VERSION = "1.10.0"
+PLUGIN_VERSION = "1.11.0"
 
 SORT_FIELD_ALIASES = {
     "time": "time",
@@ -240,6 +240,14 @@ DOWNLOAD_CLIENT_NAMES = {
     DOWNLOAD_KIND_QBITTORRENT: "qBittorrent",
     DOWNLOAD_KIND_ARIA2: "aria2",
     DOWNLOAD_KIND_YTDLP: "yt-dlp",
+}
+DOWNLOAD_BACKEND_ALIASES = {
+    "aria2": DOWNLOAD_KIND_ARIA2,
+    "qb": DOWNLOAD_KIND_QBITTORRENT,
+    "qbt": DOWNLOAD_KIND_QBITTORRENT,
+    "qbittorrent": DOWNLOAD_KIND_QBITTORRENT,
+    "ytdlp": DOWNLOAD_KIND_YTDLP,
+    "yt-dlp": DOWNLOAD_KIND_YTDLP,
 }
 ARIA2_DEFAULT_RPC_URL = "http://127.0.0.1:6800/jsonrpc"
 ARIA2_TASK_FIELDS = (
@@ -687,12 +695,20 @@ class QBittorrentManagerPlugin(Star):
             yield event.plain_result(str(error))
             return
 
-        uri = self._clean_uri(uri)
+        backend, uri = self._split_download_backend(uri)
         if not uri:
+            if backend:
+                yield event.plain_result(
+                    f"请在 /下载 {backend} 后面加上链接，"
+                    f"例如：/下载 {backend} https://example.com/movie.mkv"
+                )
+                return
             yield event.plain_result(
                 "请发送 /下载 链接，插件会自动判断下载方式：\n"
                 "磁链和 .torrent 链接交给 qBittorrent，"
                 "视频网页交给 yt-dlp，其他直链交给 aria2。\n"
+                "也可以手动指定后端："
+                "/下载 aria2 链接、/下载 qb 链接、/下载 ytdlp 链接。\n"
                 "例如：/下载 https://example.com/movie.mkv"
             )
             return
@@ -704,7 +720,10 @@ class QBittorrentManagerPlugin(Star):
 
         try:
             user_config = self._user_config(event)
-            kind, reason = self._resolve_download_kind(uri, user_config)
+            if backend:
+                kind, reason = self._forced_download_kind(backend, user_config)
+            else:
+                kind, reason = self._resolve_download_kind(uri, user_config)
             title = self._download_title(uri, kind)
             monitor = self._monitor_target(event, user_config, kind)
             if kind == DOWNLOAD_KIND_YTDLP:
@@ -1682,6 +1701,35 @@ class QBittorrentManagerPlugin(Star):
         )
         return torrent_hash
 
+    def _split_download_backend(self, text: str) -> tuple[str, str]:
+        """拆分 /下载 的手动指定写法，例如 /下载 aria2 https://…"""
+        tokens = str(text or "").strip().split()
+        if not tokens:
+            return "", ""
+        alias = tokens[0].strip("<>").lower().replace("_", "-")
+        backend = DOWNLOAD_BACKEND_ALIASES.get(alias, "")
+        if not backend:
+            return "", self._clean_uri(" ".join(tokens))
+        if len(tokens) < 2:
+            return backend, ""
+        return backend, self._clean_uri(tokens[1])
+
+    def _forced_download_kind(
+        self, backend: str, user_config: dict[str, Any]
+    ) -> tuple[str, str]:
+        kind = DOWNLOAD_BACKEND_ALIASES[backend]
+        if kind == DOWNLOAD_KIND_ARIA2 and not self._aria2_config(user_config)["url"]:
+            raise UserFacingError(
+                "未配置 aria2 RPC 地址（aria2_rpc_url），"
+                "请用 /种子配置 设置 aria2地址 后重试。"
+            )
+        if kind == DOWNLOAD_KIND_YTDLP and not self._ytdlp_config(user_config)["url"]:
+            raise UserFacingError(
+                "未配置 yt-dlp 服务地址（ytdlp_api_url），"
+                "请用 /种子配置 设置 ytdlp地址 后重试。"
+            )
+        return kind, "手动指定"
+
     def _resolve_download_kind(
         self, uri: str, user_config: dict[str, Any]
     ) -> tuple[str, str]:
@@ -2210,6 +2258,12 @@ class QBittorrentManagerPlugin(Star):
                     return ""
         return ""
 
+    def _monitor_kind(self, kind: str | None, user_config: dict[str, Any]) -> str:
+        """qb 这一路按配置里的真实客户端判定，uTorrent 不支持下载状态监控。"""
+        if kind in (None, "", DOWNLOAD_KIND_QBITTORRENT):
+            return self._download_client_type(user_config)
+        return kind
+
     def _monitor_target(
         self,
         event: AstrMessageEvent,
@@ -2219,7 +2273,7 @@ class QBittorrentManagerPlugin(Star):
         """决定要不要为这次添加建立监控，不需要时返回 None。"""
         if not bool(user_config.get("monitor_enabled", True)):
             return None
-        if (kind or self._download_client_type(user_config)) not in MONITORABLE_KINDS:
+        if self._monitor_kind(kind, user_config) not in MONITORABLE_KINDS:
             return None
         if not self._monitor_push_available():
             return None
@@ -2265,7 +2319,7 @@ class QBittorrentManagerPlugin(Star):
                 f"已加入下载状态监控，每 {self._monitor_interval_minutes()} 分钟汇报一次，"
                 "下载完成后会通知你。"
             )
-        kind = kind or self._download_client_type(user_config)
+        kind = self._monitor_kind(kind, user_config)
         if not bool(user_config.get("monitor_enabled", True)):
             return "提示：你已关闭下载状态监控。"
         if kind not in MONITORABLE_KINDS:
@@ -2654,6 +2708,8 @@ class QBittorrentManagerPlugin(Star):
             lines.append(f"状态：{state_label} ｜ 进度：{percent:.1f}%")
         else:
             lines.append(f"状态：{state_label}")
+        if watch.kind in (DOWNLOAD_KIND_ARIA2, DOWNLOAD_KIND_YTDLP):
+            lines.append(f"来源：{DOWNLOAD_CLIENT_NAMES[watch.kind]}")
         size = self._int_value(entry.get("size"))
         received = self._int_value(entry.get("received"))
         if size > 0 and received >= 0:
@@ -3835,6 +3891,7 @@ class QBittorrentManagerPlugin(Star):
             "4. /直接下载 磁链或种子链接 - 直接添加下载任务\n"
             "5. /下载 链接 - 自动识别：磁链/.torrent 给 qBittorrent，"
             "视频网页给 yt-dlp，其他直链给 aria2\n"
+            "   也可以手动指定后端：/下载 aria2 链接、/下载 qb 链接、/下载 ytdlp 链接\n"
             "6. /种子监控 查看 - 查看下载进度监控（完成会提醒你）\n"
             "7. /种子配置 帮助 - 配置自己的 PT 与下载客户端\n"
             "Gay-Torrents 需要登录：/种子配置 设置 pt账号 你的账号，"
