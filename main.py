@@ -60,7 +60,7 @@ MAX_RENDER_HEIGHT = 5000
 RENDER_BASE_HEIGHT = 214
 RENDER_ITEM_HEIGHT = 108
 RENDER_STATUS_HEIGHT = 38
-PLUGIN_VERSION = "1.11.0"
+PLUGIN_VERSION = "1.12.0"
 
 SORT_FIELD_ALIASES = {
     "time": "time",
@@ -309,7 +309,8 @@ VIDEO_HOST_DEFAULT = (
     "youtube.com,youtu.be,music.youtube.com,bilibili.com,b23.tv,twitter.com,x.com,"
     "vimeo.com,dailymotion.com,tiktok.com,douyin.com,instagram.com,facebook.com,"
     "fb.watch,twitch.tv,reddit.com,soundcloud.com,pornhub.com,xvideos.com,"
-    "xhamster.com,onlyfans.com"
+    "xhamster.com,onlyfans.com,boyfriendtv.com,eporner.com,spankbang.com,"
+    "youporn.com,redtube.com,tube8.com,missav.com"
 )
 
 
@@ -1771,6 +1772,9 @@ class QBittorrentManagerPlugin(Star):
         patterns = self._video_host_patterns(user_config)
         if any(self._host_matches(host, pattern) for pattern in patterns):
             return DOWNLOAD_KIND_YTDLP
+        if self._looks_like_web_page(name):
+            # 链接最后一段没有文件后缀，多半是视频站网页，交给 yt-dlp 解析
+            return DOWNLOAD_KIND_YTDLP
         return DOWNLOAD_KIND_ARIA2
 
     @staticmethod
@@ -1793,6 +1797,12 @@ class QBittorrentManagerPlugin(Star):
         if not pattern:
             return False
         return host == pattern or host.endswith(f".{pattern}")
+
+    @staticmethod
+    def _looks_like_web_page(name: str) -> bool:
+        """链接最后一段没有文件后缀时，按网页链接处理。"""
+        suffix = name.rsplit(".", 1)[-1] if "." in name else ""
+        return not re.fullmatch(r"[0-9a-z]{1,5}", suffix)
 
     @staticmethod
     def _clean_uri(uri: str) -> str:
@@ -2641,9 +2651,11 @@ class QBittorrentManagerPlugin(Star):
         failure = self._entry_failure(watch.kind, entry)
         if failure:
             self._download_watches.pop(watch.watch_key, None)
-            await self._send_monitor_message(
-                watch, f"「{title}」下载失败：{failure}，已停止汇报下载状态。"
-            )
+            text = f"「{title}」下载失败：{failure}，已停止汇报下载状态。"
+            hint = self._download_failure_hint(watch.kind, failure)
+            if hint:
+                text = f"{text}\n提示：{hint}"
+            await self._send_monitor_message(watch, text)
             return
         if time.time() - watch.registered_at > max_age:
             self._download_watches.pop(watch.watch_key, None)
@@ -2674,6 +2686,41 @@ class QBittorrentManagerPlugin(Star):
         if kind == DOWNLOAD_KIND_YTDLP:
             return str(entry.get("status") or "") == "completed"
         return QBittorrentManagerPlugin._qbittorrent_entry_completed(entry)
+
+    @staticmethod
+    def _download_failure_hint(kind: str, failure: str) -> str:
+        """把后端的下载错误翻译成可操作的提示。"""
+        text = failure.lower()
+        if kind == DOWNLOAD_KIND_YTDLP:
+            if failure in ("", "未知错误"):
+                return (
+                    "yt-dlp 服务没有返回错误详情，"
+                    "请在服务机器上执行 docker compose logs worker 查看原因。"
+                )
+            if "unsupported url" in text:
+                return "yt-dlp 不支持该站点，可以改用 /下载 aria2 链接 直接下载文件。"
+            if any(
+                marker in text
+                for marker in ("cloudflare", "403", "impersonate", "anti-bot")
+            ):
+                return (
+                    "站点有反爬或 Cloudflare 拦截，"
+                    "给 yt-dlp 服务安装 curl_cffi 并开启 impersonate"
+                    "（YTDLP_IMPERSONATE=chrome），或在浏览器登录后导出 Cookie。"
+                )
+            if any(
+                marker in text
+                for marker in (
+                    "unable to download webpage",
+                    "connection reset",
+                    "network is unreachable",
+                    "timed out",
+                )
+            ):
+                return (
+                    "yt-dlp 服务访问不了这个站点，请检查服务的 YTDLP_PROXY 代理设置。"
+                )
+        return ""
 
     @staticmethod
     def _entry_failure(kind: str, entry: dict[str, Any]) -> str:

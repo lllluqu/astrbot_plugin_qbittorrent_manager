@@ -347,12 +347,15 @@ HTTP(S) 链接会先由插件下载并校验为 `.torrent` 文件，再上传到
 | 链接类型 | 交给 | 判定依据 |
 | --- | --- | --- |
 | 磁链、`.torrent`、PT 站下载链接 | qBittorrent（或所配置的 uTorrent） | `magnet:` 开头；路径以 `.torrent` 结尾；查询串含 `do=download`；或文件名以 `download`/`dl` 开头的 `.php` |
-| 视频网页 | yt-dlp 服务 | 域名命中内置视频站列表或 `video_hosts` |
+| 视频网页 | yt-dlp 服务 | 域名命中内置视频站列表或 `video_hosts`；或链接最后一段没有文件后缀（`https://site.com/videos/1234/084/` 这种网页地址） |
 | 普通直链 | aria2 | 其余 http/https 链接；带 `.mkv`、`.mp4`、`.zip` 等文件后缀的链接优先按直链处理，即使是视频站的 CDN |
+
+- 内置视频站域名包含 YouTube、Bilibili、Twitter/X、TikTok、Pornhub、XVideos 等常见站点；其他站点的网页地址（没有文件后缀）也会交给 yt-dlp，因为 yt-dlp 支持上千个站点。确实想按直链下载时用 `/下载 aria2 链接` 强制。
 
 - `aria2_rpc_url` 留空时，普通直链会自动退回 qBittorrent，并在回复里说明。
 - 未配置 `ytdlp_api_url` 时会直接提示需要配置 yt-dlp 服务，不会误投给 aria2。
 - 提交结果会写明识别依据，例如 `已提交给 aria2（识别为普通直链）：movie.mkv`。
+- yt-dlp 任务失败时，汇报里除了后端返回的错误，还会附一句排查提示：站点不支持就建议改用 `/下载 aria2 链接`；遇到 Cloudflare/403 就建议给服务装 `curl_cffi` 并开启 impersonate 或导出浏览器 Cookie；连不上站点就提醒检查服务的 `YTDLP_PROXY` 代理。
 - 想跳过自动判断，可在链接前加后端名：`aria2`、`qb`（也支持 `qbt`/`qbittorrent`）、`ytdlp`（也支持 `yt-dlp`），例如 `/下载 qb https://example.com/movie.mkv` 会强制交给 qBittorrent，回复里的识别依据写「手动指定」。指定 aria2 或 yt-dlp 时若对应地址未配置，会直接提示需要配置。
 - `/下载 qb …` 仍然按你的 `download_client` 配置走，配了 uTorrent 就交给 uTorrent（该客户端不支持下载状态监控，会照旧提示）。
 
@@ -407,6 +410,16 @@ services:
 > 备选方案：`alexta69/metube` 和 `marcopiovanello/yt-dlp-web-ui` 提供网页界面，但进度主要通过 WebSocket 推送，不方便按任务轮询，因此本插件默认对接 yt-dlp-host 的 REST 接口。
 
 `yt-dlp-host` 的 `GET /status/<task_id>` 只返回任务状态而不返回字节进度，因此 yt-dlp 任务的汇报只有状态行（排队中 / 解析下载中），没有百分比。
+
+部署时有几点和默认行为差别很大，建议按实际情况调整：
+
+- 下载文件放在 `<下载目录>/<task_id>/` 下，每个任务一个子目录，不是直接平铺在你映射的目录里。
+- `TASK_RETENTION_MINUTES` 控制已完成任务目录的保留时长，**到期 worker 会连带删掉下载好的文件**（默认只有几十分钟），建议设成 `10080`（7 天）或更久。
+- 访问不了的站点靠代理：`.env` 里 `YTDLP_PROXY=http://<代理地址>:<端口>`。镜像默认没装 `python-socks`，`socks5://` 形式用不了，用 http 代理最稳。
+- 站点有 Cloudflare/反爬时，构建镜像时装 impersonation 依赖（`pip install "yt-dlp[default,curl-cffi]"`），并在 `.env` 里设 `YTDLP_IMPERSONATE=chrome` 和 `YTDLP_EXTRACTOR_ARGS_JSON={"generic":{"impersonate":["chrome"]}}`（这个值必须是数组，写成 `true` 会让 yt-dlp 抛 `'bool' object is not iterable`）。
+- 新版 yt-dlp 要求 `impersonate` 是 `ImpersonateTarget` 对象，而 yt-dlp-host 直接把 `YTDLP_IMPERSONATE` 的字符串塞进选项，会让**所有**任务瞬间失败且错误详情为空。需要在 `src/yt_dlp_host/downloader.py` 里改成 `opts["impersonate"] = ImpersonateTarget.from_str(self.settings.impersonate)`（`from yt_dlp.networking.impersonate import ImpersonateTarget`）。
+- 上面都做完仍然 403，说明站点要真实浏览器会话：在浏览器打开该站点（过完 Cloudflare 检查）后导出 Netscape 格式 Cookie 放到挂载的 `./cookies/`，设 `YTDLP_COOKIES_FILE=/app/cookies/site.txt`。
+- 国内构建卡在 `apt-get update` 时，别改上游 Dockerfile，另建一个 `Dockerfile.mirror`，把 apt 源和 pip 源换成国内镜像（`deb.debian.org`/`security.debian.org` → `mirrors.aliyun.com`，`PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/`），compose 里 `build.dockerfile: Dockerfile.mirror` 指过去即可。
 
 ### 下载状态监控
 

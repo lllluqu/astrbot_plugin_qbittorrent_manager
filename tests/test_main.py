@@ -1670,7 +1670,7 @@ class SmartDownloadTests(unittest.IsolatedAsyncioTestCase):
             "https://www.youtube.com/watch?v=abc123": "ytdlp",
             "https://b23.tv/BV1xx411c7mD": "ytdlp",
             "https://live.twitch.tv/somechannel": "ytdlp",
-            "https://archive.org/details/some-item": "aria2",
+            "https://archive.org/details/some-item": "ytdlp",
         }
 
         for uri, kind in cases.items():
@@ -1679,6 +1679,68 @@ class SmartDownloadTests(unittest.IsolatedAsyncioTestCase):
                     self.instance._classify_download_target(uri, self.user_config),
                     kind,
                 )
+
+    def test_extension_less_links_are_treated_as_web_pages(self):
+        cases = {
+            "https://www.boyfriendtv.com/videos/1758289/084/": "ytdlp",
+            "https://www.example.com/watch/abc": "ytdlp",
+            "https://www.example.com/": "ytdlp",
+            "https://files.example.com/get?id=1": "ytdlp",
+        }
+        for uri, kind in cases.items():
+            with self.subTest(uri=uri):
+                self.assertEqual(
+                    self.instance._classify_download_target(uri, self.user_config),
+                    kind,
+                )
+
+    def test_named_files_still_count_as_direct_links(self):
+        for uri in (
+            "https://a.example.com/x.tar.gz",
+            "https://a.example.com/movie.2024.mkv",
+            "https://a.example.com/pkg-1.0.apk",
+        ):
+            with self.subTest(uri=uri):
+                self.assertEqual(
+                    self.instance._classify_download_target(uri, self.user_config),
+                    "aria2",
+                )
+
+    def test_web_page_heuristic_reads_the_last_path_segment(self):
+        for name in ("084", "", "watch", "some-item"):
+            with self.subTest(name=name):
+                self.assertTrue(self.instance._looks_like_web_page(name))
+        for name in ("movie.mkv", "archive.zip", "setup.exe"):
+            with self.subTest(name=name):
+                self.assertFalse(self.instance._looks_like_web_page(name))
+
+    def test_download_failure_hints_point_at_the_cause(self):
+        hint = self.instance._download_failure_hint
+        self.assertIn(
+            "YTDLP_PROXY",
+            hint(
+                "ytdlp",
+                "ERROR: [generic] 084: Unable to download webpage: "
+                "Connection reset by peer",
+            ),
+        )
+        self.assertIn(
+            "impersonate",
+            hint(
+                "ytdlp",
+                "ERROR: [generic] Got HTTP Error 403 caused by "
+                "Cloudflare anti-bot challenge",
+            ),
+        )
+        self.assertIn(
+            "aria2",
+            hint("ytdlp", "ERROR: [generic] Unsupported URL: https://x.example/a"),
+        )
+        self.assertIn(
+            "docker compose logs",
+            hint("ytdlp", "未知错误"),
+        )
+        self.assertEqual(hint("aria2", "HTTP Error 403: Forbidden"), "")
 
     def test_custom_video_hosts_are_honoured(self):
         user_config = dict(self.user_config, video_hosts="example.com, .other.site")

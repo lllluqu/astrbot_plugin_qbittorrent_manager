@@ -2,6 +2,19 @@
 
 所有重要更改都将记录在此文件中。
 
+## [1.12.0] - 2026-11-19
+
+### `/下载` 网页链接判定与下载失败提示
+
+- 链接最后一段没有文件后缀时按网页处理，交给 yt-dlp（修复 `https://www.boyfriendtv.com/videos/1758289/084/` 这类视频站网页被当成普通直链丢给 aria2）。带 `.mkv`、`.mp4`、`.zip` 等后缀的链接仍然优先按直链走，确实需要按直链下载无后缀链接时用 `/下载 aria2 链接` 强制。
+- 内置视频站域名扩充（`boyfriendtv.com`、`eporner.com`、`spankbang.com`、`youporn.com`、`redtube.com`、`tube8.com`、`missav.com`），`archive.org` 之类无后缀的详情链接现在也会交给 yt-dlp。
+- yt-dlp 任务失败时，汇报里附带可操作提示：站点不支持 → 改用 `/下载 aria2 链接`；Cloudflare/403 → 给服务装 `curl_cffi` 并开启 impersonate 或导出 Cookie；连不上站点 → 检查服务的 `YTDLP_PROXY`；服务没返回错误详情 → 提示去查 `docker compose logs worker`。
+- 修正 aria2 任务状态查询：`aria2.tellStatus` 的 gid 必须以字符串参数传递，之前写成 `[gid]` 会让 aria2 返回「The parameter at 0 has wrong type.」，导致任务永远查不到、监控误报「任务已消失」。
+- aria2 的 `errorCode=0` 是正常值，不再被当成错误显示在进度消息里（此前会出现「错误：0」）。
+- README 补充 yt-dlp 服务的部署要点（任务子目录、`TASK_RETENTION_MINUTES` 会删除已完成文件、http 代理、curl_cffi/impersonate/Cookie、国内构建换源）。
+- 补充网页链接判定、失败提示与 aria2 报文形态的单元测试（共 126 项），并在局域网真机验证 aria2 与 yt-dlp 的添加、进度查询与完成判定。
+
+
 ## [1.11.0] - 2026-11-19
 
 ### `/下载` 手动指定下载工具
