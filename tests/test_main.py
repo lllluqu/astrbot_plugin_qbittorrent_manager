@@ -1802,6 +1802,38 @@ class SmartDownloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("aria2 返回错误", str(ctx.exception))
 
+    async def test_fetch_aria2_task_map_sends_gid_as_string(self):
+        requests, _clients = self.install_post_client(
+            {
+                "result": {
+                    "status": "active",
+                    "totalLength": "100",
+                    "completedLength": "50",
+                }
+            }
+        )
+        watch = plugin_module.DownloadWatch(
+            session="QQ|GroupMessage|g1|10001",
+            user_id="10001",
+            sender_id="10001",
+            group=True,
+            title="movie.mkv",
+            task_ref="gid001",
+            kind="aria2",
+            endpoint="http://127.0.0.1:6800/jsonrpc",
+            credential="secret",
+        )
+
+        entries = await self.instance._fetch_aria2_task_map([watch])
+
+        payload = requests[0][1]
+        self.assertEqual(payload["method"], "aria2.tellStatus")
+        # aria2 要求 gid 是字符串参数，包成 [gid] 会被判成参数类型错误
+        self.assertEqual(payload["params"][0], "token:secret")
+        self.assertEqual(payload["params"][1], "gid001")
+        self.assertIn("status", payload["params"][2])
+        self.assertEqual(entries["gid001"]["progress"], 0.5)
+
     async def test_add_to_ytdlp_returns_task_id(self):
         requests, clients = self.install_post_client(
             {"status": "waiting", "task_id": "T123"}

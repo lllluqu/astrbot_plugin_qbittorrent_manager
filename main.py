@@ -2519,7 +2519,9 @@ class QBittorrentManagerPlugin(Star):
                     watch.endpoint,
                     watch.credential,
                     "aria2.tellStatus",
-                    [[watch.task_ref], list(ARIA2_TASK_FIELDS)],
+                    # gid 必须是字符串参数，写成 [gid] 会被 aria2 判成
+                    # “The parameter at 0 has wrong type.”
+                    [watch.task_ref, list(ARIA2_TASK_FIELDS)],
                 )
             except UserFacingError as error:
                 logger.warning("查询 aria2 任务状态失败：%s", error)
@@ -2577,7 +2579,9 @@ class QBittorrentManagerPlugin(Star):
             name = str(files[0].get("path") or "").replace("\\", "/").rsplit("/", 1)[-1]
         error = str(raw.get("errorMessage") or "").strip()
         if not error:
-            error = str(raw.get("errorCode") or "").strip()
+            # aria2 的正常任务也带 errorCode=0，不能当成错误
+            code = str(raw.get("errorCode") or "").strip()
+            error = "" if code in ("", "0") else code
         return {
             "name": name,
             "state": status,
