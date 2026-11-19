@@ -1817,12 +1817,14 @@ class QBittorrentManagerPlugin(Star):
     async def _aria2_call(
         self, rpc_url: str, token: str, method: str, params: list[Any]
     ) -> Any:
-        secret = f"token:{token}" if token else ""
+        # aria2 只在配置了 --rpc-secret 时要求 token: 前缀的鉴权参数
+        args = [f"token:{token}"] if token else []
+        args.extend(params)
         payload = {
             "jsonrpc": "2.0",
             "id": "astrbot_qbittorrent_manager",
             "method": method,
-            "params": [secret, *params],
+            "params": args,
         }
         async with httpx.AsyncClient(
             timeout=self._float_config("request_timeout", 20.0, 5.0, 120.0)

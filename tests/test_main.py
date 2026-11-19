@@ -1783,6 +1783,15 @@ class SmartDownloadTests(unittest.IsolatedAsyncioTestCase):
             payload["params"][2], {"dir": "/downloads/bot", "out": "movie.mkv"}
         )
 
+    async def test_add_to_aria2_omits_token_when_not_configured(self):
+        requests, _clients = self.install_post_client({"result": "gid-2"})
+        uri = "https://cdn.example.com/movie.mkv"
+        config = dict(self.user_config)
+        config["aria2_rpc_token"] = ""
+
+        self.assertEqual(await self.instance._add_to_aria2(uri, config), "gid-2")
+        self.assertEqual(requests[0][1]["params"][0], [uri])
+
     async def test_add_to_aria2_reports_rpc_errors(self):
         self.install_post_client({"error": {"message": "Parameter error"}})
 
