@@ -39,6 +39,7 @@ Gay-Torrents 必须登录才能搜索。可以填写登录后的 Cookie，也可
 - ⬇️ **批量下载**：使用 `/种子下载 1 3 5` 一次添加多个搜索结果到 qBittorrent 或 uTorrent。
 - ⏱️ **下载状态监控**：添加到 qBittorrent 的任务默认每 5 分钟汇报一次下载状态，下载完成后会在原会话 @ 添加者。
 - 🔗 **直接下载**：使用 `/直接下载` 添加磁链或 HTTP(S) `.torrent` 链接。
+- 🧭 **智能分流**：使用 `/下载 链接` 自动识别——磁链和 `.torrent` 交给 qBittorrent，视频网页交给 yt-dlp，其他直链交给 aria2。
 - 👥 **独立用户配置**：按 QQ 号隔离 PT 账号、下载客户端和搜索结果。
 - ⚙️ **双入口配置**：管理员可在 AstrBot 面板维护用户配置，用户也可在群聊或私聊中自行配置。
 - ⏱️ **选择超时**：搜索结果默认缓存 10 分钟，超时需重新搜索。
@@ -83,6 +84,13 @@ git clone <本仓库地址>
 | `ut_url` | 选择 uTorrent 时必填 | 空 | uTorrent WebUI 地址，例如 `http://127.0.0.1:8080`。 |
 | `ut_username` | 否 | 空 | uTorrent WebUI 用户名。 |
 | `ut_password` | 否 | 空 | uTorrent WebUI 密码。 |
+| `aria2_rpc_url` | 否 | `http://127.0.0.1:6800/jsonrpc` | aria2 JSON-RPC 地址，留空时普通直链会退回 qBittorrent。 |
+| `aria2_rpc_token` | 否 | 空 | aria2 RPC 密钥，对应 `--rpc-secret`。 |
+| `aria2_save_path` | 否 | 空 | aria2 保存目录，留空则使用 aria2 自身的默认目录。 |
+| `ytdlp_api_url` | 否 | 空 | yt-dlp 服务地址（推荐 `Vasysik/yt-dlp-host`），视频网页链接交给它下载。 |
+| `ytdlp_api_key` | 否 | 空 | yt-dlp 服务的 API Key，请求头 `X-API-Key`。 |
+| `ytdlp_format` | 否 | 空 | 传给 yt-dlp 服务的 `video_format` 参数，例如 `bestvideo`。 |
+| `video_hosts` | 否 | 空 | 额外的视频站域名，逗号分隔，命中后交给 yt-dlp。 |
 | `direct_torrent_max_size_mb` | 否 | `50` | 直接下载 HTTP(S) 种子链接时允许的最大响应大小，防止误传大文件。 |
 | `max_results` | 否 | `10` | 每次搜索最多展示的结果数，范围 `1-30`。 |
 | `cache_ttl_seconds` | 否 | `600` | 搜索结果等待选择的超时时间，默认 10 分钟。 |
@@ -323,9 +331,81 @@ Gay-Torrents 的搜索接口不接受排序参数，插件会取回前 5 页结�
 
 HTTP(S) 链接会先由插件下载并校验为 `.torrent` 文件，再上传到下载客户端；磁链会直接交给下载客户端处理。
 
+### 智能分流下载
+
+```text
+/下载 magnet:?xt=urn:btih:xxxx
+/下载 https://example.com/movie.mkv
+/下载 https://www.bilibili.com/video/BV1xx411c7mD
+```
+
+插件按链接类型自动分发到对应下载工具：
+
+| 链接类型 | 交给 | 判定依据 |
+| --- | --- | --- |
+| 磁链、`.torrent`、PT 站下载链接 | qBittorrent（或所配置的 uTorrent） | `magnet:` 开头；路径以 `.torrent` 结尾；查询串含 `do=download`；或文件名以 `download`/`dl` 开头的 `.php` |
+| 视频网页 | yt-dlp 服务 | 域名命中内置视频站列表或 `video_hosts` |
+| 普通直链 | aria2 | 其余 http/https 链接；带 `.mkv`、`.mp4`、`.zip` 等文件后缀的链接优先按直链处理，即使是视频站的 CDN |
+
+- `aria2_rpc_url` 留空时，普通直链会自动退回 qBittorrent，并在回复里说明。
+- 未配置 `ytdlp_api_url` 时会直接提示需要配置 yt-dlp 服务，不会误投给 aria2。
+- 提交结果会写明识别依据，例如 `已提交给 aria2（识别为普通直链）：movie.mkv`。
+
+#### aria2
+
+aria2 需要开启 JSON-RPC，例如：
+
+```bash
+aria2c --enable-rpc --rpc-listen-all --rpc-listen-port=6800 \
+  --rpc-secret=你的密钥 --dir=/downloads/botdownload
+```
+
+插件只传 `dir`（来自 `aria2_save_path`）和 `out`（文件名）两个选项，其余行为沿用 aria2 自身的启动配置。
+
+#### yt-dlp 服务
+
+推荐使用 [Vasysik/yt-dlp-host](https://github.com/Vasysik/yt-dlp-host)：Docker 部署，带 API Key、任务队列和可轮询的状态接口，插件就是按它的接口实现的。
+
+```yaml
+services:
+  yt-dlp-host:
+    build: .
+    command: gunicorn -c gunicorn.conf.py src.server:app
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      DOWNLOAD_DIR: /app/downloads
+    volumes:
+      - ./data:/app/data
+      - /downloads/botdownload:/app/downloads
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: python -m yt_dlp_host.worker
+    env_file:
+      - .env
+    environment:
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      DOWNLOAD_DIR: /app/downloads
+    volumes:
+      - ./data:/app/data
+      - /downloads/botdownload:/app/downloads
+    restart: unless-stopped
+```
+
+`.env` 至少设置 `ADMIN_API_KEY`，并把 `/app/downloads` 映射到你希望存放文件的目录（例如群网盘的 `botdownload` 文件夹）。插件侧填写 `ytdlp_api_url=http://127.0.0.1:5000` 与 `ytdlp_api_key=<ADMIN_API_KEY>`，可选 `ytdlp_format`。
+
+> 备选方案：`alexta69/metube` 和 `marcopiovanello/yt-dlp-web-ui` 提供网页界面，但进度主要通过 WebSocket 推送，不方便按任务轮询，因此本插件默认对接 yt-dlp-host 的 REST 接口。
+
+`yt-dlp-host` 的 `GET /status/<task_id>` 只返回任务状态而不返回字节进度，因此 yt-dlp 任务的汇报只有状态行（排队中 / 解析下载中），没有百分比。
+
 ### 下载状态监控
 
-用 `/种子下载` 或 `/直接下载` 添加到 qBittorrent 的任务会自动进入监控，默认每 5 分钟在原会话汇报一次进度：
+用 `/种子下载`、`/直接下载` 或 `/下载` 提交到 qBittorrent、aria2、yt-dlp 的任务会自动进入监控，默认每 5 分钟在原会话汇报一次进度：
 
 ```text
 下载进度｜Some Movie 1080p
@@ -353,9 +433,10 @@ HTTP(S) 链接会先由插件下载并校验为 `.torrent` 文件，再上传到
 /种子监控 帮助
 ```
 
-- `停止` 只停止汇报，不会取消或暂停 qBittorrent 中的下载任务。
-- 完成判定使用 qBittorrent 的任务状态（`uploading`、`stalledUP`、`pausedUP` 等已完成/做种状态，或进度达到 100%）。
-- 任务在 qBittorrent 中被删除、超过 `monitor_max_hours` 小时仍未完成，或已汇报 60 次时会自动停止监控，并说明原因。
+- `停止` 只停止汇报，不会取消或暂停下载工具里的任务。
+- 完成判定按工具区分：qBittorrent 用任务状态（`uploading`、`stalledUP`、`pausedUP` 等已完成/做种状态，或进度达到 100%），aria2 用 `complete`，yt-dlp 用 `completed`。
+- qBittorrent 和 aria2 会汇报百分比、速度和剩余时间；yt-dlp 服务只汇报任务状态。
+- 任务被删除、下载失败、超过 `monitor_max_hours` 小时仍未完成，或已汇报 60 次时会自动停止监控，并说明原因。
 - 监控记录只保存在内存中，AstrBot 或插件重启后需要重新添加任务才会继续监控。
 - uTorrent 暂不支持下载状态监控；AstrBot 版本过旧、缺少主动推送接口时也会自动跳过监控。
 

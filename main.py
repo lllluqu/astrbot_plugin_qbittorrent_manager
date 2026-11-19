@@ -60,7 +60,7 @@ MAX_RENDER_HEIGHT = 5000
 RENDER_BASE_HEIGHT = 214
 RENDER_ITEM_HEIGHT = 108
 RENDER_STATUS_HEIGHT = 38
-PLUGIN_VERSION = "1.9.0"
+PLUGIN_VERSION = "1.10.0"
 
 SORT_FIELD_ALIASES = {
     "time": "time",
@@ -228,6 +228,82 @@ QB_STATE_LABELS = {
     "unknown": "未知状态",
 }
 
+DOWNLOAD_KIND_QBITTORRENT = "qbittorrent"
+DOWNLOAD_KIND_ARIA2 = "aria2"
+DOWNLOAD_KIND_YTDLP = "ytdlp"
+MONITORABLE_KINDS = (
+    DOWNLOAD_KIND_QBITTORRENT,
+    DOWNLOAD_KIND_ARIA2,
+    DOWNLOAD_KIND_YTDLP,
+)
+DOWNLOAD_CLIENT_NAMES = {
+    DOWNLOAD_KIND_QBITTORRENT: "qBittorrent",
+    DOWNLOAD_KIND_ARIA2: "aria2",
+    DOWNLOAD_KIND_YTDLP: "yt-dlp",
+}
+ARIA2_DEFAULT_RPC_URL = "http://127.0.0.1:6800/jsonrpc"
+ARIA2_TASK_FIELDS = (
+    "status",
+    "totalLength",
+    "completedLength",
+    "uploadLength",
+    "downloadSpeed",
+    "uploadSpeed",
+    "errorCode",
+    "errorMessage",
+    "files",
+)
+ARIA2_STATUS_LABELS = {
+    "active": "下载中",
+    "waiting": "排队中",
+    "paused": "已暂停",
+    "removing": "正在移除",
+    "error": "下载失败",
+    "complete": "下载完成",
+    "removed": "已移除",
+}
+YTDLP_STATUS_LABELS = {
+    "waiting": "排队中",
+    "processing": "解析下载中",
+    "completed": "下载完成",
+    "error": "下载失败",
+}
+MEDIA_URL_SUFFIXES = (
+    ".mp4",
+    ".mkv",
+    ".webm",
+    ".avi",
+    ".mov",
+    ".m2ts",
+    ".ts",
+    ".wmv",
+    ".flv",
+    ".mp3",
+    ".m4a",
+    ".flac",
+    ".opus",
+    ".wav",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".iso",
+    ".apk",
+    ".exe",
+    ".pdf",
+    ".epub",
+    ".srt",
+    ".ass",
+    ".vtt",
+)
+VIDEO_HOST_DEFAULT = (
+    "youtube.com,youtu.be,music.youtube.com,bilibili.com,b23.tv,twitter.com,x.com,"
+    "vimeo.com,dailymotion.com,tiktok.com,douyin.com,instagram.com,facebook.com,"
+    "fb.watch,twitch.tv,reddit.com,soundcloud.com,pornhub.com,xvideos.com,"
+    "xhamster.com,onlyfans.com"
+)
+
 
 @dataclass(frozen=True)
 class ConfigField:
@@ -258,6 +334,13 @@ USER_CONFIG_FIELDS = {
     "ut_url": ConfigField("uTorrent WebUI 地址"),
     "ut_username": ConfigField("uTorrent 用户名"),
     "ut_password": ConfigField("uTorrent 密码", sensitive=True),
+    "aria2_rpc_url": ConfigField("aria2 RPC 地址"),
+    "aria2_rpc_token": ConfigField("aria2 RPC 密钥", sensitive=True),
+    "aria2_save_path": ConfigField("aria2 保存路径"),
+    "ytdlp_api_url": ConfigField("yt-dlp 服务地址"),
+    "ytdlp_api_key": ConfigField("yt-dlp API Key", sensitive=True),
+    "ytdlp_format": ConfigField("yt-dlp 视频格式"),
+    "video_hosts": ConfigField("视频站域名"),
     "direct_torrent_max_size_mb": ConfigField("直链种子大小上限（MB）", "int", 1, 500),
     "max_results": ConfigField("最大搜索结果数", "int", 1, 30),
     "cache_ttl_seconds": ConfigField("搜索缓存时间（秒）", "int", 60, 3600),
@@ -286,6 +369,13 @@ BUILTIN_USER_CONFIG = {
     "ut_url": "",
     "ut_username": "",
     "ut_password": "",
+    "aria2_rpc_url": ARIA2_DEFAULT_RPC_URL,
+    "aria2_rpc_token": "",
+    "aria2_save_path": "",
+    "ytdlp_api_url": "",
+    "ytdlp_api_key": "",
+    "ytdlp_format": "",
+    "video_hosts": "",
     "direct_torrent_max_size_mb": 50,
     "max_results": 10,
     "cache_ttl_seconds": 600,
@@ -322,6 +412,17 @@ CONFIG_KEY_ALIASES = {
     "ut用户名": "ut_username",
     "ut账号": "ut_username",
     "ut密码": "ut_password",
+    "aria2地址": "aria2_rpc_url",
+    "aria2rpc": "aria2_rpc_url",
+    "aria2密钥": "aria2_rpc_token",
+    "aria2token": "aria2_rpc_token",
+    "aria2保存路径": "aria2_save_path",
+    "ytdlp地址": "ytdlp_api_url",
+    "ytdlp服务地址": "ytdlp_api_url",
+    "ytdlp密钥": "ytdlp_api_key",
+    "ytdlp格式": "ytdlp_format",
+    "视频站域名": "video_hosts",
+    "视频域名": "video_hosts",
     "种子大小上限": "direct_torrent_max_size_mb",
     "结果数": "max_results",
     "缓存时间": "cache_ttl_seconds",
@@ -389,20 +490,25 @@ class DownloadWatch:
     sender_id: str
     group: bool
     title: str
-    torrent_hash: str
-    qb_url: str
-    qb_username: str
-    qb_password: str
+    task_ref: str
+    kind: str = DOWNLOAD_KIND_QBITTORRENT
+    endpoint: str = ""
+    username: str = ""
+    credential: str = ""
     registered_at: float = field(default_factory=time.time)
     report_count: int = 0
 
     @property
     def client_key(self) -> str:
-        return f"{self.qb_url}|{self.torrent_hash}"
+        return f"{self.kind}|{self.endpoint}|{self.username}|{self.credential}"
 
     @property
     def watch_key(self) -> str:
-        return f"{self.client_key}|{self.user_id}"
+        return f"{self.client_key}|{self.task_ref}|{self.user_id}"
+
+    @property
+    def client_name(self) -> str:
+        return DOWNLOAD_CLIENT_NAMES.get(self.kind, self.kind)
 
 
 @register(
@@ -573,6 +679,63 @@ class QBittorrentManagerPlugin(Star):
         async for result in self.direct_download(event, uri):
             yield result
 
+    @filter.command("下载")
+    async def smart_download(self, event: AstrMessageEvent, uri: str = ""):
+        try:
+            self._ensure_user_access(event)
+        except UserFacingError as error:
+            yield event.plain_result(str(error))
+            return
+
+        uri = self._clean_uri(uri)
+        if not uri:
+            yield event.plain_result(
+                "请发送 /下载 链接，插件会自动判断下载方式：\n"
+                "磁链和 .torrent 链接交给 qBittorrent，"
+                "视频网页交给 yt-dlp，其他直链交给 aria2。\n"
+                "例如：/下载 https://example.com/movie.mkv"
+            )
+            return
+        if not self._is_supported_direct_uri(uri):
+            yield event.plain_result(
+                "链接格式不支持，请提供 magnet、http 或 https 链接。"
+            )
+            return
+
+        try:
+            user_config = self._user_config(event)
+            kind, reason = self._resolve_download_kind(uri, user_config)
+            title = self._download_title(uri, kind)
+            monitor = self._monitor_target(event, user_config, kind)
+            if kind == DOWNLOAD_KIND_YTDLP:
+                task_ref = await self._add_to_ytdlp(uri, user_config)
+            elif kind == DOWNLOAD_KIND_ARIA2:
+                task_ref = await self._add_to_aria2(uri, user_config)
+            else:
+                task_ref = await self._add_uri_to_download_client(
+                    uri, user_config, monitor, title
+                )
+            if kind in {DOWNLOAD_KIND_ARIA2, DOWNLOAD_KIND_YTDLP}:
+                self._register_download_watch(
+                    monitor, user_config, title, task_ref, kind
+                )
+        except UserFacingError as error:
+            yield event.plain_result(str(error))
+            return
+        except Exception as error:  # noqa: BLE001
+            logger.exception("提交下载任务失败")
+            yield event.plain_result(f"提交下载失败：{error}")
+            return
+
+        if kind in {DOWNLOAD_KIND_ARIA2, DOWNLOAD_KIND_YTDLP}:
+            client_name = DOWNLOAD_CLIENT_NAMES[kind]
+        else:
+            client_name = self._download_client_name(user_config)
+        yield event.plain_result(
+            f"已提交给 {client_name}（识别为{reason}）：{self._short_title(title)}"
+            f"{self._monitor_note(user_config, monitor, 1, kind)}"
+        )
+
     @filter.command("种子帮助")
     async def torrent_help(self, event: AstrMessageEvent):
         try:
@@ -598,7 +761,7 @@ class QBittorrentManagerPlugin(Star):
         if not watches:
             yield event.plain_result(
                 "当前没有正在监控的下载任务。"
-                "用 /种子下载 或 /直接下载 添加到 qBittorrent 后会自动开始监控。"
+                "用 /种子下载、/直接下载 或 /下载 提交任务后会自动开始监控。"
             )
             return
 
@@ -614,7 +777,8 @@ class QBittorrentManagerPlugin(Star):
         for index, watch in enumerate(watches, start=1):
             minutes = max(0, int((time.time() - watch.registered_at) // 60))
             lines.append(
-                f"{index}. {self._short_title(watch.title)}｜已监控 {minutes} 分钟"
+                f"{index}. [{watch.client_name}] "
+                f"{self._short_title(watch.title)}｜已监控 {minutes} 分钟"
             )
         lines.append("停止汇报：/种子监控 停止 序号（或 全部），不会取消下载任务。")
         yield event.plain_result("\n".join(lines))
@@ -1518,6 +1682,196 @@ class QBittorrentManagerPlugin(Star):
         )
         return torrent_hash
 
+    def _resolve_download_kind(
+        self, uri: str, user_config: dict[str, Any]
+    ) -> tuple[str, str]:
+        kind = self._classify_download_target(uri, user_config)
+        if kind == DOWNLOAD_KIND_QBITTORRENT:
+            return DOWNLOAD_KIND_QBITTORRENT, "磁链或种子"
+        if kind == DOWNLOAD_KIND_YTDLP:
+            if not self._ytdlp_config(user_config)["url"]:
+                raise UserFacingError(
+                    "这是视频网页链接，但没有配置 yt-dlp 服务。"
+                    "请在插件配置里填写 ytdlp_api_url，或用 /种子配置 设置 ytdlp地址。"
+                )
+            return DOWNLOAD_KIND_YTDLP, "视频网页"
+        if self._aria2_config(user_config)["url"]:
+            return DOWNLOAD_KIND_ARIA2, "普通直链"
+        return (
+            DOWNLOAD_KIND_QBITTORRENT,
+            "普通直链（aria2 未配置，已改用 qBittorrent）",
+        )
+
+    def _classify_download_target(self, uri: str, user_config: dict[str, Any]) -> str:
+        if uri.lower().startswith("magnet:"):
+            return DOWNLOAD_KIND_QBITTORRENT
+        parsed = urlparse(uri)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise UserFacingError("链接格式不支持，请提供 magnet、http 或 https 链接。")
+        path = unquote(parsed.path).lower()
+        name = path.rsplit("/", 1)[-1]
+        torrent_marker = (
+            path.endswith(".torrent")
+            or "do=download" in parsed.query.lower()
+            or (name.startswith(("download", "dl")) and name.endswith(".php"))
+        )
+        if torrent_marker:
+            return DOWNLOAD_KIND_QBITTORRENT
+        if path.endswith(MEDIA_URL_SUFFIXES):
+            return DOWNLOAD_KIND_ARIA2
+        host = self._url_host(uri)
+        patterns = self._video_host_patterns(user_config)
+        if any(self._host_matches(host, pattern) for pattern in patterns):
+            return DOWNLOAD_KIND_YTDLP
+        return DOWNLOAD_KIND_ARIA2
+
+    @staticmethod
+    def _url_host(uri: str) -> str:
+        netloc = urlparse(uri).netloc
+        return netloc.rsplit("@", 1)[-1].split(":")[0].strip().lower()
+
+    @staticmethod
+    def _video_host_patterns(user_config: dict[str, Any]) -> tuple[str, ...]:
+        raw = f"{VIDEO_HOST_DEFAULT},{user_config.get('video_hosts') or ''}"
+        hosts = {
+            part.strip().lower().lstrip(".")
+            for part in re.split(r"[,\s;，、]+", raw)
+            if part.strip()
+        }
+        return tuple(sorted(hosts))
+
+    @staticmethod
+    def _host_matches(host: str, pattern: str) -> bool:
+        if not pattern:
+            return False
+        return host == pattern or host.endswith(f".{pattern}")
+
+    @staticmethod
+    def _clean_uri(uri: str) -> str:
+        tokens = str(uri or "").split()
+        if not tokens:
+            return ""
+        return tokens[0].strip("<>")
+
+    def _download_title(self, uri: str, kind: str) -> str:
+        if kind == DOWNLOAD_KIND_YTDLP:
+            host = self._url_host(uri)
+            path = unquote(urlparse(uri).path).strip("/")
+            title = f"视频｜{host}/{path}" if path else f"视频｜{host}"
+            return self._short_title(title)
+        return self._direct_title(uri)
+
+    def _aria2_config(self, user_config: dict[str, Any]) -> dict[str, str]:
+        return {
+            "url": str(user_config.get("aria2_rpc_url") or "").strip(),
+            "token": str(user_config.get("aria2_rpc_token") or "").strip(),
+            "save_path": str(user_config.get("aria2_save_path") or "").strip(),
+        }
+
+    def _ytdlp_config(self, user_config: dict[str, Any]) -> dict[str, str]:
+        return {
+            "url": str(user_config.get("ytdlp_api_url") or "").strip().rstrip("/"),
+            "api_key": str(user_config.get("ytdlp_api_key") or "").strip(),
+            "format": str(user_config.get("ytdlp_format") or "").strip(),
+        }
+
+    @staticmethod
+    def _ytdlp_headers(api_key: str) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-API-Key"] = api_key
+        return headers
+
+    @staticmethod
+    def _aria2_output_name(uri: str) -> str:
+        name = unquote(urlparse(uri).path).rstrip("/").rsplit("/", 1)[-1]
+        name = re.sub(r'[\\/:*?"<>|]+', "_", name).strip()
+        return name[:120]
+
+    async def _add_to_aria2(self, uri: str, user_config: dict[str, Any]) -> str:
+        aria2 = self._aria2_config(user_config)
+        if not aria2["url"]:
+            raise UserFacingError("未配置 aria2 RPC 地址（aria2_rpc_url）。")
+        options: dict[str, str] = {}
+        if aria2["save_path"]:
+            options["dir"] = aria2["save_path"]
+        filename = self._aria2_output_name(uri)
+        if filename:
+            options["out"] = filename
+        try:
+            gid = await self._aria2_call(
+                aria2["url"],
+                aria2["token"],
+                "aria2.addUri",
+                [[uri], options],
+            )
+        except httpx.TransportError as error:
+            raise UserFacingError(
+                f"无法连接 aria2 RPC（{aria2['url']}）。"
+                "请确认 aria2 已用 --enable-rpc 启动，并检查 aria2_rpc_url 配置。"
+            ) from error
+        if not isinstance(gid, str) or not gid:
+            raise UserFacingError("aria2 没有返回任务 ID。")
+        return gid
+
+    async def _aria2_call(
+        self, rpc_url: str, token: str, method: str, params: list[Any]
+    ) -> Any:
+        secret = f"token:{token}" if token else ""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "astrbot_qbittorrent_manager",
+            "method": method,
+            "params": [secret, *params],
+        }
+        async with httpx.AsyncClient(
+            timeout=self._float_config("request_timeout", 20.0, 5.0, 120.0)
+        ) as client:
+            response = await client.post(rpc_url, json=payload)
+        self._raise_for_response(response, "aria2 RPC 请求失败")
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise UserFacingError("aria2 RPC 返回了无法解析的内容。") from error
+        if not isinstance(data, dict):
+            raise UserFacingError("aria2 RPC 返回格式异常。")
+        if data.get("error"):
+            error = data["error"]
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            raise UserFacingError(f"aria2 返回错误：{message}")
+        return data.get("result")
+
+    async def _add_to_ytdlp(self, uri: str, user_config: dict[str, Any]) -> str:
+        ytdlp = self._ytdlp_config(user_config)
+        if not ytdlp["url"]:
+            raise UserFacingError("未配置 yt-dlp 服务地址（ytdlp_api_url）。")
+        payload: dict[str, str] = {"url": uri}
+        if ytdlp["format"]:
+            payload["video_format"] = ytdlp["format"]
+        endpoint = urljoin(f"{ytdlp['url']}/", "get_video")
+        try:
+            async with httpx.AsyncClient(
+                headers=self._ytdlp_headers(ytdlp["api_key"]),
+                timeout=self._float_config("request_timeout", 20.0, 5.0, 120.0),
+            ) as client:
+                response = await client.post(endpoint, json=payload)
+        except httpx.TransportError as error:
+            raise UserFacingError(
+                f"无法连接 yt-dlp 服务（{ytdlp['url']}），请检查 ytdlp_api_url 配置。"
+            ) from error
+        self._raise_for_response(response, "yt-dlp 服务请求失败")
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise UserFacingError("yt-dlp 服务返回了无法解析的内容。") from error
+        if not isinstance(data, dict):
+            raise UserFacingError("yt-dlp 服务返回格式异常。")
+        task_id = str(data.get("task_id") or "").strip()
+        if not task_id:
+            reason = str(data.get("error") or "").strip()
+            raise UserFacingError(f"yt-dlp 服务没有接受该链接。{reason}".strip())
+        return task_id
+
     async def _download_torrent_file(
         self, torrent: TorrentResult, user_config: dict[str, Any]
     ) -> TorrentFile:
@@ -1855,12 +2209,15 @@ class QBittorrentManagerPlugin(Star):
         return ""
 
     def _monitor_target(
-        self, event: AstrMessageEvent, user_config: dict[str, Any]
+        self,
+        event: AstrMessageEvent,
+        user_config: dict[str, Any],
+        kind: str | None = None,
     ) -> MonitorTarget | None:
         """决定要不要为这次添加建立监控，不需要时返回 None。"""
         if not bool(user_config.get("monitor_enabled", True)):
             return None
-        if self._download_client_type(user_config) != "qbittorrent":
+        if (kind or self._download_client_type(user_config)) not in MONITORABLE_KINDS:
             return None
         if not self._monitor_push_available():
             return None
@@ -1893,7 +2250,11 @@ class QBittorrentManagerPlugin(Star):
         return hasattr(getattr(self, "context", None), "send_message")
 
     def _monitor_note(
-        self, user_config: dict[str, Any], monitor: Any, added: int
+        self,
+        user_config: dict[str, Any],
+        monitor: Any,
+        added: int,
+        kind: str | None = None,
     ) -> str:
         if added <= 0:
             return ""
@@ -1902,12 +2263,12 @@ class QBittorrentManagerPlugin(Star):
                 f"已加入下载状态监控，每 {self._monitor_interval_minutes()} 分钟汇报一次，"
                 "下载完成后会通知你。"
             )
-        if self._download_client_type(user_config) != "qbittorrent":
-            if not bool(user_config.get("monitor_enabled", True)):
-                return ""
-            return "提示：uTorrent 暂不支持下载状态监控。"
+        kind = kind or self._download_client_type(user_config)
         if not bool(user_config.get("monitor_enabled", True)):
             return "提示：你已关闭下载状态监控。"
+        if kind not in MONITORABLE_KINDS:
+            client_name = self._download_client_name(user_config)
+            return f"提示：{client_name} 暂不支持下载状态监控。"
         return "提示：当前 AstrBot 版本不支持主动推送，已跳过下载状态监控。"
 
     def _register_download_watch(
@@ -1915,25 +2276,41 @@ class QBittorrentManagerPlugin(Star):
         monitor: MonitorTarget | None,
         user_config: dict[str, Any],
         title: str,
-        torrent_hash: str,
+        task_ref: str,
+        kind: str = DOWNLOAD_KIND_QBITTORRENT,
     ) -> None:
-        if monitor is None or not torrent_hash:
+        if monitor is None or not task_ref:
             return
-        qb_config = self._qbittorrent_config(user_config)
+        endpoint, username, credential = self._watch_credentials(kind, user_config)
+        if not endpoint:
+            return
         watch = DownloadWatch(
             session=monitor.session,
             user_id=monitor.user_id,
             sender_id=monitor.sender_id,
             group=monitor.group,
             title=title,
-            torrent_hash=torrent_hash,
-            qb_url=qb_config["url"],
-            qb_username=qb_config["username"],
-            qb_password=qb_config["password"],
+            task_ref=task_ref,
+            kind=kind,
+            endpoint=endpoint,
+            username=username,
+            credential=credential,
         )
         self._download_watches[watch.watch_key] = watch
         self._prune_watches()
         self._ensure_monitor_task()
+
+    def _watch_credentials(
+        self, kind: str, user_config: dict[str, Any]
+    ) -> tuple[str, str, str]:
+        if kind == DOWNLOAD_KIND_ARIA2:
+            aria2 = self._aria2_config(user_config)
+            return aria2["url"], "", aria2["token"]
+        if kind == DOWNLOAD_KIND_YTDLP:
+            ytdlp = self._ytdlp_config(user_config)
+            return ytdlp["url"], "", ytdlp["api_key"]
+        qb_config = self._qbittorrent_config(user_config)
+        return qb_config["url"], qb_config["username"], qb_config["password"]
 
     def _prune_watches(self) -> None:
         extra = len(self._download_watches) - MONITOR_MAX_WATCHES
@@ -2025,29 +2402,39 @@ class QBittorrentManagerPlugin(Star):
         max_age = self._monitor_max_hours() * 3600
         groups: dict[str, list[DownloadWatch]] = {}
         for watch in watches:
-            groups.setdefault(f"{watch.qb_url}|{watch.qb_username}", []).append(watch)
+            groups.setdefault(watch.client_key, []).append(watch)
         for group in groups.values():
-            entries = await self._fetch_qbittorrent_task_map(group)
+            entries = await self._fetch_task_map(group)
             if entries is None:
                 continue
             for watch in group:
                 await self._report_download_watch(
                     watch,
-                    entries.get(watch.torrent_hash),
+                    entries.get(watch.task_ref),
                     max_age,
                     report_progress,
                 )
+
+    async def _fetch_task_map(
+        self, watches: list[DownloadWatch]
+    ) -> dict[str, dict[str, Any]] | None:
+        kind = watches[0].kind
+        if kind == DOWNLOAD_KIND_ARIA2:
+            return await self._fetch_aria2_task_map(watches)
+        if kind == DOWNLOAD_KIND_YTDLP:
+            return await self._fetch_ytdlp_task_map(watches)
+        return await self._fetch_qbittorrent_task_map(watches)
 
     async def _fetch_qbittorrent_task_map(
         self, watches: list[DownloadWatch]
     ) -> dict[str, dict[str, Any]] | None:
         first = watches[0]
         qb_config = {
-            "url": first.qb_url,
-            "username": first.qb_username,
-            "password": first.qb_password,
+            "url": first.endpoint,
+            "username": first.username,
+            "password": first.credential,
         }
-        hashes = [watch.torrent_hash for watch in watches]
+        hashes = [watch.task_ref for watch in watches]
         try:
             async with httpx.AsyncClient(
                 base_url=qb_config["url"],
@@ -2066,6 +2453,110 @@ class QBittorrentManagerPlugin(Star):
             if task.get("hash")
         }
 
+    async def _fetch_aria2_task_map(
+        self, watches: list[DownloadWatch]
+    ) -> dict[str, dict[str, Any]] | None:
+        entries: dict[str, dict[str, Any]] = {}
+        for watch in watches:
+            try:
+                raw = await self._aria2_call(
+                    watch.endpoint,
+                    watch.credential,
+                    "aria2.tellStatus",
+                    [[watch.task_ref], list(ARIA2_TASK_FIELDS)],
+                )
+            except UserFacingError as error:
+                logger.warning("查询 aria2 任务状态失败：%s", error)
+                continue
+            except Exception as error:  # noqa: BLE001
+                logger.warning(
+                    "查询 aria2 下载状态失败（%s）：%s", watch.endpoint, error
+                )
+                return None
+            if isinstance(raw, dict):
+                entries[watch.task_ref] = self._aria2_entry(raw)
+        return entries
+
+    async def _fetch_ytdlp_task_map(
+        self, watches: list[DownloadWatch]
+    ) -> dict[str, dict[str, Any]] | None:
+        first = watches[0]
+        entries: dict[str, dict[str, Any]] = {}
+        status_base = urljoin(f"{first.endpoint.rstrip('/')}/", "status/")
+        try:
+            async with httpx.AsyncClient(
+                headers=self._ytdlp_headers(first.credential),
+                timeout=self._float_config("request_timeout", 20.0, 5.0, 120.0),
+            ) as client:
+                for watch in watches:
+                    response = await client.get(f"{status_base}{watch.task_ref}")
+                    if response.status_code == 404:
+                        continue
+                    self._raise_for_response(response, "yt-dlp 状态查询失败")
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        entries[watch.task_ref] = self._ytdlp_entry(payload, watch)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("查询 yt-dlp 下载状态失败（%s）：%s", first.endpoint, error)
+            return None
+        return entries
+
+    @staticmethod
+    def _aria2_entry(raw: dict[str, Any]) -> dict[str, Any]:
+        total = QBittorrentManagerPlugin._int_value(raw.get("totalLength"))
+        completed = QBittorrentManagerPlugin._int_value(raw.get("completedLength"))
+        status = str(raw.get("status") or "")
+        progress: float | None = None
+        if status == "complete":
+            progress = 1.0
+        elif total > 0 and completed >= 0:
+            progress = completed / total
+        speed = QBittorrentManagerPlugin._int_value(raw.get("downloadSpeed"))
+        eta = -1
+        if 0 < speed and total > 0 and completed >= 0:
+            eta = max(0, (total - completed) // speed)
+        name = ""
+        files = raw.get("files")
+        if isinstance(files, list) and files and isinstance(files[0], dict):
+            name = str(files[0].get("path") or "").replace("\\", "/").rsplit("/", 1)[-1]
+        error = str(raw.get("errorMessage") or "").strip()
+        if not error:
+            error = str(raw.get("errorCode") or "").strip()
+        return {
+            "name": name,
+            "state": status,
+            "status": status,
+            "progress": progress,
+            "size": total,
+            "received": completed,
+            "dlspeed": speed,
+            "upspeed": QBittorrentManagerPlugin._int_value(raw.get("uploadSpeed")),
+            "eta": eta,
+            "error": error,
+        }
+
+    @staticmethod
+    def _ytdlp_entry(raw: dict[str, Any], watch: DownloadWatch) -> dict[str, Any]:
+        status = str(raw.get("status") or "")
+        error = str(raw.get("error") or "").strip()
+        name = str(raw.get("output_filename") or "").strip()
+        if not name:
+            file_ref = str(raw.get("file") or "").strip()
+            if file_ref:
+                name = file_ref.replace("\\", "/").rsplit("/", 1)[-1]
+        return {
+            "name": name or watch.title,
+            "state": status,
+            "status": status,
+            "progress": 1.0 if status == "completed" else None,
+            "size": -1,
+            "received": -1,
+            "dlspeed": -1,
+            "upspeed": -1,
+            "eta": -1,
+            "error": error,
+        }
+
     async def _report_download_watch(
         self,
         watch: DownloadWatch,
@@ -2074,16 +2565,24 @@ class QBittorrentManagerPlugin(Star):
         report_progress: bool,
     ) -> None:
         title = self._short_title(watch.title)
-        if entry is None:
+        if entry is None or str(entry.get("status") or "") == "removed":
             self._download_watches.pop(watch.watch_key, None)
             await self._send_monitor_message(
-                watch, f"qBittorrent 中已找不到「{title}」，已停止汇报下载状态。"
+                watch,
+                f"{watch.client_name} 中已找不到「{title}」，已停止汇报下载状态。",
             )
             return
-        if self._qbittorrent_entry_completed(entry):
+        if self._entry_completed(watch.kind, entry):
             self._download_watches.pop(watch.watch_key, None)
             await self._send_monitor_message(
                 watch, self._monitor_complete_message(), mention=True
+            )
+            return
+        failure = self._entry_failure(watch.kind, entry)
+        if failure:
+            self._download_watches.pop(watch.watch_key, None)
+            await self._send_monitor_message(
+                watch, f"「{title}」下载失败：{failure}，已停止汇报下载状态。"
             )
             return
         if time.time() - watch.registered_at > max_age:
@@ -2109,6 +2608,25 @@ class QBittorrentManagerPlugin(Star):
         )
 
     @staticmethod
+    def _entry_completed(kind: str, entry: dict[str, Any]) -> bool:
+        if kind == DOWNLOAD_KIND_ARIA2:
+            return str(entry.get("status") or "") == "complete"
+        if kind == DOWNLOAD_KIND_YTDLP:
+            return str(entry.get("status") or "") == "completed"
+        return QBittorrentManagerPlugin._qbittorrent_entry_completed(entry)
+
+    @staticmethod
+    def _entry_failure(kind: str, entry: dict[str, Any]) -> str:
+        if kind == DOWNLOAD_KIND_QBITTORRENT:
+            state = str(entry.get("state") or "")
+            if state in {"error", "missingFiles"}:
+                return QB_STATE_LABELS.get(state, state)
+            return ""
+        if str(entry.get("status") or "") == "error":
+            return str(entry.get("error") or "").strip() or "未知错误"
+        return ""
+
+    @staticmethod
     def _qbittorrent_entry_completed(entry: dict[str, Any]) -> bool:
         state = str(entry.get("state") or "")
         status = str(entry.get("status") or "")
@@ -2120,23 +2638,30 @@ class QBittorrentManagerPlugin(Star):
 
     def _format_progress_text(self, watch: DownloadWatch, entry: dict[str, Any]) -> str:
         state = str(entry.get("state") or "")
-        state_label = QB_STATE_LABELS.get(state) or (state or "未知状态")
+        labels = QB_STATE_LABELS
+        if watch.kind == DOWNLOAD_KIND_ARIA2:
+            labels = ARIA2_STATUS_LABELS
+        elif watch.kind == DOWNLOAD_KIND_YTDLP:
+            labels = YTDLP_STATUS_LABELS
+        state_label = labels.get(state) or (state or "未知状态")
+        name = str(entry.get("name") or "").strip() or watch.title
+        lines = [f"下载进度｜{self._short_title(name)}"]
         ratio = self._float_value(entry.get("progress"))
-        percent = ratio * 100 if 0 <= ratio <= 1 else ratio
+        if ratio >= 0:
+            percent = ratio * 100 if ratio <= 1 else ratio
+            lines.append(f"状态：{state_label} ｜ 进度：{percent:.1f}%")
+        else:
+            lines.append(f"状态：{state_label}")
         size = self._int_value(entry.get("size"))
         received = self._int_value(entry.get("received"))
-        if received < 0 and size > 0:
-            received = int(size * min(max(ratio, 0.0), 1.0))
-        name = str(entry.get("name") or "").strip() or watch.title
-        lines = [
-            f"下载进度｜{self._short_title(name)}",
-            f"状态：{state_label} ｜ 进度：{percent:.1f}%",
-        ]
-        if size > 0:
+        if size > 0 and received >= 0:
             lines.append(
                 f"已下载：{self._format_bytes(received)} / {self._format_bytes(size)}"
             )
-        if not state.endswith("UP"):
+        error = str(entry.get("error") or "").strip()
+        if error:
+            lines.append(f"错误：{error}")
+        if watch.kind != DOWNLOAD_KIND_YTDLP and not state.endswith("UP"):
             lines.append(
                 f"速度：↓{self._format_speed(entry.get('dlspeed'))} "
                 f"↑{self._format_speed(entry.get('upspeed'))}"
@@ -2228,11 +2753,12 @@ class QBittorrentManagerPlugin(Star):
     @staticmethod
     def _monitor_help_text() -> str:
         return (
-            "下载状态监控（只监控 qBittorrent 任务）：\n"
-            "/种子下载 或 /直接下载 添加任务后自动开始监控。\n"
+            "下载状态监控（支持 qBittorrent、aria2 和 yt-dlp 任务）：\n"
+            "/种子下载、/直接下载 或 /下载 提交任务后自动开始监控。\n"
             "/种子监控 查看：查看当前正在监控的任务。\n"
             "/种子监控 停止 序号：停止某个任务的汇报（不会取消下载）。\n"
             "/种子监控 停止 全部：停止所有汇报。\n"
+            "qBittorrent 和 aria2 会汇报百分比进度，yt-dlp 服务只汇报任务状态。\n"
             "下载完成会按固定提示词提醒添加者；监控记录只保存在内存，重启后需重新添加。"
         )
 
@@ -3305,8 +3831,10 @@ class QBittorrentManagerPlugin(Star):
             "2. /种子 --sort=做种 --order=降序 -- 关键词 - 排序搜索\n"
             "3. /种子下载 序号... - 批量添加所选种子到下载客户端\n"
             "4. /直接下载 磁链或种子链接 - 直接添加下载任务\n"
-            "5. /种子监控 查看 - 查看下载进度监控（完成会提醒你）\n"
-            "6. /种子配置 帮助 - 配置自己的 PT 与下载客户端\n"
+            "5. /下载 链接 - 自动识别：磁链/.torrent 给 qBittorrent，"
+            "视频网页给 yt-dlp，其他直链给 aria2\n"
+            "6. /种子监控 查看 - 查看下载进度监控（完成会提醒你）\n"
+            "7. /种子配置 帮助 - 配置自己的 PT 与下载客户端\n"
             "Gay-Torrents 需要登录：/种子配置 设置 pt账号 你的账号，"
             "再 /种子配置 设置 pt密码 你的密码。\n"
             "每位用户按 QQ 号使用独立配置。"
@@ -3326,9 +3854,13 @@ class QBittorrentManagerPlugin(Star):
             "示例：/种子配置 设置 pt账号 你的账号\n"
             "示例：/种子配置 设置 pt密码 你的密码\n"
             "示例：/种子配置 设置 cookie 登录后复制的 Cookie\n"
+            "示例：/种子配置 设置 aria2地址 http://127.0.0.1:6800/jsonrpc\n"
+            "示例：/种子配置 设置 ytdlp地址 http://127.0.0.1:5000\n"
             f"常用配置项：{aliases}\n"
             "也可直接使用 AstrBot 面板中的英文配置键。\n"
             "站点类型可选 gaytorrents、nexusphp、mteam。\n"
+            "/下载 会自动分流：磁链和 .torrent 给 qBittorrent，"
+            "视频网页给 yt-dlp，其他直链给 aria2。\n"
             "Cookie 和密码建议仅在私聊中设置。"
         )
 

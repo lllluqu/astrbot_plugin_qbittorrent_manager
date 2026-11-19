@@ -1433,7 +1433,7 @@ class DownloadMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.instance._download_watches), 1)
         watch = next(iter(self.instance._download_watches.values()))
         self.assertEqual(watch.title, "种子 A 改名")
-        self.assertEqual(watch.qb_url, "http://127.0.0.1:8080")
+        self.assertEqual(watch.endpoint, "http://127.0.0.1:8080")
         self.assertEqual(watch.session, self.event.unified_msg_origin)
 
     async def test_watch_registry_drops_oldest_over_limit(self):
@@ -1632,6 +1632,399 @@ class DownloadMonitorTests(unittest.IsolatedAsyncioTestCase):
                 return plugin_module.httpx.Response(200, json=tasks)
 
         return FakeClient()
+
+
+class SmartDownloadTests(unittest.IsolatedAsyncioTestCase):
+    MAGNET = "magnet:?xt=urn:btih:" + "ab12" * 10 + "&dn=Seed%20A"
+
+    def setUp(self):
+        self.instance = make_plugin({"monitor_interval_minutes": 5})
+        self.user_config = {
+            "download_client": "qbittorrent",
+            "qb_url": "http://127.0.0.1:8080/",
+            "aria2_rpc_url": "http://127.0.0.1:6800/jsonrpc",
+            "aria2_rpc_token": "secret",
+            "aria2_save_path": "/downloads/bot",
+            "ytdlp_api_url": "http://127.0.0.1:5000",
+            "ytdlp_api_key": "key123",
+        }
+        self.event = FakeEvent("10001", session="QQ|GroupMessage|group1|10001")
+
+    def install_client(self, factory):
+        calls = []
+        original = plugin_module.httpx.AsyncClient
+        plugin_module.httpx.AsyncClient = factory
+        self.addCleanup(setattr, plugin_module.httpx, "AsyncClient", original)
+        return calls
+
+    def test_classifies_links_by_download_backend(self):
+        cases = {
+            self.MAGNET: "qbittorrent",
+            "https://www.gay-torrents.net/torrentdetails.php?torrentid=a1&do=download": (
+                "qbittorrent"
+            ),
+            "https://www.tjupt.org/download.php?id=12345": "qbittorrent",
+            "https://files.example.com/movies/seed-a.torrent": "qbittorrent",
+            "https://cdn.example.com/movie.mkv": "aria2",
+            "https://cdn.example.com/video.mp4": "aria2",
+            "https://www.youtube.com/watch?v=abc123": "ytdlp",
+            "https://b23.tv/BV1xx411c7mD": "ytdlp",
+            "https://live.twitch.tv/somechannel": "ytdlp",
+            "https://archive.org/details/some-item": "aria2",
+        }
+
+        for uri, kind in cases.items():
+            with self.subTest(uri=uri):
+                self.assertEqual(
+                    self.instance._classify_download_target(uri, self.user_config),
+                    kind,
+                )
+
+    def test_custom_video_hosts_are_honoured(self):
+        user_config = dict(self.user_config, video_hosts="example.com, .other.site")
+
+        self.assertEqual(
+            self.instance._classify_download_target(
+                "https://watch.example.com/clip/9", user_config
+            ),
+            "ytdlp",
+        )
+        self.assertEqual(
+            self.instance._classify_download_target(
+                "https://sub.other.site/clip/9", user_config
+            ),
+            "ytdlp",
+        )
+
+    def test_rejects_unsupported_link_schemes(self):
+        with self.assertRaises(plugin_module.UserFacingError):
+            self.instance._classify_download_target("ftp://a/b", self.user_config)
+
+    def test_resolved_kind_reports_the_reason(self):
+        self.assertEqual(
+            self.instance._resolve_download_kind(self.MAGNET, self.user_config),
+            ("qbittorrent", "磁链或种子"),
+        )
+        self.assertEqual(
+            self.instance._resolve_download_kind(
+                "https://cdn.example.com/movie.mkv", self.user_config
+            ),
+            ("aria2", "普通直链"),
+        )
+        self.assertEqual(
+            self.instance._resolve_download_kind(
+                "https://www.youtube.com/watch?v=abc", self.user_config
+            ),
+            ("ytdlp", "视频网页"),
+        )
+
+    def test_ytdlp_without_service_url_explains_configuration(self):
+        user_config = dict(self.user_config, ytdlp_api_url="")
+
+        with self.assertRaises(plugin_module.UserFacingError) as ctx:
+            self.instance._resolve_download_kind(
+                "https://www.youtube.com/watch?v=abc", user_config
+            )
+
+        self.assertIn("ytdlp_api_url", str(ctx.exception))
+
+    def test_missing_aria2_falls_back_to_qbittorrent(self):
+        user_config = dict(self.user_config, aria2_rpc_url="")
+
+        kind, reason = self.instance._resolve_download_kind(
+            "https://cdn.example.com/movie.mkv", user_config
+        )
+
+        self.assertEqual(kind, "qbittorrent")
+        self.assertIn("aria2 未配置", reason)
+
+    def test_clean_uri_takes_the_first_token(self):
+        self.assertEqual(
+            self.instance._clean_uri("  <https://example.com/a.mkv> 备注 "),
+            "https://example.com/a.mkv",
+        )
+        self.assertEqual(self.instance._clean_uri("   "), "")
+
+    def install_post_client(self, payload, status_code=200):
+        requests = []
+        clients = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                clients.append(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def post(self, url, json=None, **kwargs):
+                requests.append((url, json, kwargs))
+                return plugin_module.httpx.Response(status_code, json=payload)
+
+        self.install_client(FakeClient)
+        return requests, clients
+
+    async def test_add_to_aria2_uses_jsonrpc_with_options(self):
+        requests, _clients = self.install_post_client({"result": "gid001"})
+
+        gid = await self.instance._add_to_aria2(
+            "https://cdn.example.com/movie.mkv", self.user_config
+        )
+
+        self.assertEqual(gid, "gid001")
+        url, payload, _kwargs = requests[0]
+        self.assertEqual(url, "http://127.0.0.1:6800/jsonrpc")
+        self.assertEqual(payload["method"], "aria2.addUri")
+        self.assertEqual(payload["params"][0], "token:secret")
+        self.assertEqual(payload["params"][1], ["https://cdn.example.com/movie.mkv"])
+        self.assertEqual(
+            payload["params"][2], {"dir": "/downloads/bot", "out": "movie.mkv"}
+        )
+
+    async def test_add_to_aria2_reports_rpc_errors(self):
+        self.install_post_client({"error": {"message": "Parameter error"}})
+
+        with self.assertRaises(plugin_module.UserFacingError) as ctx:
+            await self.instance._add_to_aria2(
+                "https://cdn.example.com/a.mkv", self.user_config
+            )
+
+        self.assertIn("aria2 返回错误", str(ctx.exception))
+
+    async def test_add_to_ytdlp_returns_task_id(self):
+        requests, clients = self.install_post_client(
+            {"status": "waiting", "task_id": "T123"}
+        )
+
+        task_id = await self.instance._add_to_ytdlp(
+            "https://www.youtube.com/watch?v=abc", self.user_config
+        )
+
+        self.assertEqual(task_id, "T123")
+        url, payload, _kwargs = requests[0]
+        self.assertEqual(url, "http://127.0.0.1:5000/get_video")
+        self.assertEqual(payload["url"], "https://www.youtube.com/watch?v=abc")
+        self.assertEqual(clients[0]["headers"]["X-API-Key"], "key123")
+
+    async def test_add_to_ytdlp_reports_rejected_links(self):
+        self.install_post_client({"error": "Unsupported URL"})
+
+        with self.assertRaises(plugin_module.UserFacingError) as ctx:
+            await self.instance._add_to_ytdlp(
+                "https://example.com/watch", self.user_config
+            )
+
+        self.assertIn("Unsupported URL", str(ctx.exception))
+
+    def test_aria2_entries_are_normalised(self):
+        entry = self.instance._aria2_entry(
+            {
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "250",
+                "downloadSpeed": "125",
+                "files": [{"path": "/downloads/bot/movie.mkv"}],
+            }
+        )
+
+        self.assertEqual(entry["name"], "movie.mkv")
+        self.assertEqual(entry["state"], "active")
+        self.assertAlmostEqual(entry["progress"], 0.25)
+        self.assertEqual(entry["size"], 1000)
+        self.assertEqual(entry["dlspeed"], 125)
+
+        done = self.instance._aria2_entry({"status": "complete", "totalLength": "10"})
+        self.assertEqual(done["progress"], 1.0)
+
+    def test_ytdlp_entries_are_normalised(self):
+        watch = plugin_module.DownloadWatch(
+            session="QQ|GroupMessage|g1|10001",
+            user_id="10001",
+            sender_id="10001",
+            group=True,
+            title="视频｜youtube.com/watch",
+            task_ref="T123",
+            kind="ytdlp",
+            endpoint="http://127.0.0.1:5000",
+        )
+
+        entry = self.instance._ytdlp_entry(
+            {"status": "completed", "file": "/files/T123/video.mp4"}, watch
+        )
+
+        self.assertEqual(entry["name"], "video.mp4")
+        self.assertEqual(entry["state"], "completed")
+        self.assertEqual(entry["progress"], 1.0)
+
+        failed = self.instance._ytdlp_entry(
+            {"status": "error", "error": "Video unavailable"}, watch
+        )
+        self.assertIsNone(failed["progress"])
+        self.assertEqual(failed["error"], "Video unavailable")
+        self.assertEqual(failed["name"], watch.title)
+
+    def test_completion_and_failure_are_per_backend(self):
+        self.assertTrue(self.instance._entry_completed("aria2", {"status": "complete"}))
+        self.assertFalse(self.instance._entry_completed("aria2", {"status": "active"}))
+        self.assertTrue(
+            self.instance._entry_completed("ytdlp", {"status": "completed"})
+        )
+        self.assertFalse(self.instance._entry_completed("ytdlp", {"status": "waiting"}))
+        self.assertEqual(
+            self.instance._entry_failure("ytdlp", {"status": "error", "error": "403"}),
+            "403",
+        )
+        self.assertEqual(
+            self.instance._entry_failure("qbittorrent", {"state": "missingFiles"}),
+            "文件缺失",
+        )
+        self.assertEqual(
+            self.instance._entry_failure("qbittorrent", {"state": "active"}), ""
+        )
+
+    def test_progress_text_differs_per_backend(self):
+        watch = plugin_module.DownloadWatch(
+            session="QQ|GroupMessage|g1|10001",
+            user_id="10001",
+            sender_id="10001",
+            group=True,
+            title="movie.mkv",
+            task_ref="gid001",
+            kind="aria2",
+            endpoint="http://127.0.0.1:6800/jsonrpc",
+            credential="secret",
+        )
+        aria2_text = self.instance._format_progress_text(
+            watch,
+            {
+                "name": "movie.mkv",
+                "state": "active",
+                "status": "active",
+                "progress": 0.5,
+                "size": 1024,
+                "received": 512,
+                "dlspeed": 512,
+                "upspeed": 0,
+                "eta": 1,
+            },
+        )
+        self.assertIn("状态：下载中", aria2_text)
+        self.assertIn("50.0%", aria2_text)
+
+        ytdlp_watch = plugin_module.DownloadWatch(
+            session="QQ|GroupMessage|g1|10001",
+            user_id="10001",
+            sender_id="10001",
+            group=True,
+            title="视频｜youtube.com/watch",
+            task_ref="T123",
+            kind="ytdlp",
+            endpoint="http://127.0.0.1:5000",
+            credential="key123",
+        )
+        ytdlp_text = self.instance._format_progress_text(
+            ytdlp_watch,
+            {"name": "video.mp4", "state": "processing", "status": "processing"},
+        )
+        self.assertIn("状态：解析下载中", ytdlp_text)
+        self.assertNotIn("进度：", ytdlp_text)
+
+    async def test_monitor_once_reports_backend_completion(self):
+        watches = {}
+        for kind, task_ref, entry in (
+            ("aria2", "gid001", {"status": "complete", "progress": 1.0}),
+            ("ytdlp", "T123", {"status": "completed", "progress": 1.0}),
+        ):
+            watch = plugin_module.DownloadWatch(
+                session="QQ|GroupMessage|g1|10001",
+                user_id="10001",
+                sender_id="10001",
+                group=True,
+                title=f"任务 {kind}",
+                task_ref=task_ref,
+                kind=kind,
+                endpoint=f"http://127.0.0.1/{kind}",
+            )
+            watches[watch.watch_key] = watch
+            self.instance._download_watches[watch.watch_key] = watch
+
+        async def fake_fetch(_instance, group):
+            first = group[0]
+            if first.kind == "aria2":
+                return {"gid001": {"status": "complete", "progress": 1.0}}
+            return {"T123": {"status": "completed", "progress": 1.0}}
+
+        original_fetch = plugin_module.QBittorrentManagerPlugin._fetch_task_map
+        plugin_module.QBittorrentManagerPlugin._fetch_task_map = fake_fetch
+        self.addCleanup(
+            setattr,
+            plugin_module.QBittorrentManagerPlugin,
+            "_fetch_task_map",
+            original_fetch,
+        )
+
+        await self.instance._monitor_once()
+
+        sent = [chain_text(chain) for _, chain in self.instance.context.sent]
+        self.assertEqual(len(sent), 2)
+        for text in sent:
+            self.assertTrue(text.endswith(DownloadMonitorTests.COMPLETE_MESSAGE), text)
+        self.assertEqual(self.instance._download_watches, {})
+
+    async def test_download_command_routes_to_every_backend(self):
+        calls = []
+
+        async def fake_aria2(uri, _user_config):
+            calls.append(("aria2", uri))
+            return "gid001"
+
+        async def fake_ytdlp(uri, _user_config):
+            calls.append(("ytdlp", uri))
+            return "T123"
+
+        async def fake_qb(uri, user_config, monitor=None, title=""):
+            calls.append(("qb", uri))
+            self.instance._register_download_watch(
+                monitor, user_config, title, "ab12" * 10
+            )
+            return "ab12" * 10
+
+        self.instance._user_config = lambda _event: self.user_config
+        self.instance._add_to_aria2 = fake_aria2
+        self.instance._add_to_ytdlp = fake_ytdlp
+        self.instance._add_uri_to_download_client = fake_qb
+
+        replies = []
+        for uri in (
+            self.MAGNET,
+            "https://cdn.example.com/movie.mkv",
+            "https://www.youtube.com/watch?v=abc",
+        ):
+            generator = self.instance.smart_download(self.event, uri).__aiter__()
+            while True:
+                try:
+                    result = await anext(generator)
+                except StopAsyncIteration:
+                    break
+                replies.append(result)
+
+        self.assertEqual(
+            [kind for kind, _ in calls],
+            ["qb", "aria2", "ytdlp"],
+        )
+        self.assertIn("已提交给 qBittorrent（识别为磁链或种子）", str(replies[0]))
+        self.assertIn("已提交给 aria2（识别为普通直链）", str(replies[1]))
+        self.assertIn("已提交给 yt-dlp（识别为视频网页）", str(replies[2]))
+        kinds = {watch.kind for watch in self.instance._download_watches.values()}
+        self.assertEqual(kinds, {"qbittorrent", "aria2", "ytdlp"})
+
+    async def test_download_command_explains_missing_argument(self):
+        generator = self.instance.smart_download(self.event, "")
+        result = await anext(generator)
+
+        self.assertIn("请发送 /下载 链接", str(result))
 
 
 if __name__ == "__main__":

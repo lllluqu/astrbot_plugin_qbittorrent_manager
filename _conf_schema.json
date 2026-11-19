@@ -112,6 +112,48 @@
     "hint": "可留空",
     "default": ""
   },
+  "aria2_rpc_url": {
+    "description": "aria2 JSON-RPC 地址，/下载 识别为普通直链的任务会交给 aria2。",
+    "type": "string",
+    "hint": "http://127.0.0.1:6800/jsonrpc",
+    "default": "http://127.0.0.1:6800/jsonrpc"
+  },
+  "aria2_rpc_token": {
+    "description": "aria2 RPC 密钥，对应 aria2 的 --rpc-secret。",
+    "type": "string",
+    "hint": "可留空",
+    "default": ""
+  },
+  "aria2_save_path": {
+    "description": "可选：aria2 下载保存目录，留空则使用 aria2 自身的默认目录。",
+    "type": "string",
+    "hint": "例如 /downloads/botdownload",
+    "default": ""
+  },
+  "ytdlp_api_url": {
+    "description": "yt-dlp 服务地址，/下载 识别为视频网页的链接会交给它解析下载。",
+    "type": "string",
+    "hint": "http://127.0.0.1:5000",
+    "default": ""
+  },
+  "ytdlp_api_key": {
+    "description": "yt-dlp 服务的 API Key（请求头 X-API-Key）。",
+    "type": "string",
+    "hint": "可留空",
+    "default": ""
+  },
+  "ytdlp_format": {
+    "description": "可选：yt-dlp 视频格式，对应服务的 video_format 参数。",
+    "type": "string",
+    "hint": "例如 bestvideo",
+    "default": ""
+  },
+  "video_hosts": {
+    "description": "额外的视频站域名，逗号分隔，命中后交给 yt-dlp。",
+    "type": "string",
+    "hint": "例如 example.com,other.site",
+    "default": ""
+  },
   "direct_torrent_max_size_mb": {
     "description": "直接下载 HTTP(S) 种子链接时允许的最大响应大小，防止误传大文件。",
     "type": "int",
@@ -336,6 +378,48 @@
             "hint": "敏感信息，请勿公开。",
             "default": "",
             "condition": {"download_client": "utorrent"}
+          },
+          "aria2_rpc_url": {
+            "description": "aria2 RPC 地址",
+            "type": "string",
+            "hint": "http://127.0.0.1:6800/jsonrpc",
+            "default": "http://127.0.0.1:6800/jsonrpc"
+          },
+          "aria2_rpc_token": {
+            "description": "aria2 RPC 密钥",
+            "type": "string",
+            "hint": "敏感信息，请勿公开。",
+            "default": ""
+          },
+          "aria2_save_path": {
+            "description": "aria2 保存路径",
+            "type": "string",
+            "hint": "例如 /downloads/botdownload",
+            "default": ""
+          },
+          "ytdlp_api_url": {
+            "description": "yt-dlp 服务地址",
+            "type": "string",
+            "hint": "http://127.0.0.1:5000",
+            "default": ""
+          },
+          "ytdlp_api_key": {
+            "description": "yt-dlp API Key",
+            "type": "string",
+            "hint": "敏感信息，请勿公开。",
+            "default": ""
+          },
+          "ytdlp_format": {
+            "description": "yt-dlp 视频格式",
+            "type": "string",
+            "hint": "例如 bestvideo",
+            "default": ""
+          },
+          "video_hosts": {
+            "description": "额外的视频站域名",
+            "type": "string",
+            "hint": "逗号分隔，例如 example.com,other.site",
+            "default": ""
           },
           "direct_torrent_max_size_mb": {
             "description": "直链种子大小上限（MB）",

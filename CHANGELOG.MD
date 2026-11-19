@@ -2,6 +2,19 @@
 
 所有重要更改都将记录在此文件中。
 
+## [1.10.0] - 2026-11-19
+
+### `/下载` 智能分流
+
+- 新增 `/下载 链接`：自动识别链接类型并分发给对应下载工具——磁链、`.torrent`、PT 站下载链接（含 `do=download`、`download.php`/`dl.php`）交给 qBittorrent；视频网页交给 yt-dlp 服务；其余直链交给 aria2。
+- 带 `.mkv`、`.mp4`、`.zip` 等文件后缀的链接优先按直链处理，即使是视频站的 CDN 也会走 aria2；可用 `/种子配置 设置 视频站域名` 追加自己的视频站。
+- aria2 通过 JSON-RPC 提交（`aria2_rpc_url`、`aria2_rpc_token`、`aria2_save_path`），只传 `dir` 与 `out` 两个选项；`aria2_rpc_url` 留空时普通直链自动退回 qBittorrent 并在回复里说明。
+- yt-dlp 推荐使用可 Docker 部署的 `Vasysik/yt-dlp-host`（`POST /get_video` + `GET /status/<task_id>`），配置 `ytdlp_api_url`、`ytdlp_api_key`、`ytdlp_format`；README 给出 compose 示例与把下载目录挂载到指定目录的方法。
+- 回复会写明识别依据，例如 `已提交给 aria2（识别为普通直链）：movie.mkv`。
+- 下载状态监控扩展到 aria2 与 yt-dlp：按 `kind` 分别用 `aria2.tellStatus` 和 `/status/<task_id>` 轮询，aria2 汇报百分比、速度和剩余时间，yt-dlp 只汇报任务状态；aria2 `complete`、yt-dlp `completed` 视为完成，失败会汇报错误原因并停止监控。
+- `/种子监控 查看` 现在会标注任务来自哪个工具（qBittorrent / aria2 / yt-dlp）。
+- 补充智能分流与多工具监控的单元测试（分类表、自定义视频域、aria2 JSON-RPC 报文、yt-dlp 请求头与错误、状态归一化、完成与失败判定、`/下载` 路由、多工具完成通知）。
+
 ## [1.9.0] - 2026-11-19
 
 ### 下载状态监控
